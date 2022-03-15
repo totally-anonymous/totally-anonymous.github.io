@@ -1,0 +1,3118 @@
+Date: Mon, 6 Sep 2021 23:02:12 +0200
+Subject: [PATCH] fse22: repro package
+
+---
+ analyses/ClusterSimilarity.R                  | 154 ++++
+ analyses/animate_test.R                       | 261 +++++++
+ analyses/maintainers_graph_util.R             |  51 +-
+ analyses/maintainers_section_graph.R          |  18 +-
+ analyses/util.R                               |  11 +-
+ bin/pasta_maintainers_stats.py                |   3 +
+ docker/build.sh                               |  15 +
+ docker/pasta-fse22-stage1.dockerfile          |  25 +
+ docker/pasta-fse22-stage2.dockerfile          |  41 ++
+ docker/pasta-fse22-stage3.dockerfile          |   7 +
+ docker/pasta-skeleton.dockerfile              |   5 +-
+ fse22-artifact/LoCMaintainersScript.sh        |  36 +
+ fse22-artifact/cluster_gui/README.md          |  22 +
+ fse22-artifact/cluster_gui/do_repro.sh        |   7 +
+ .../cluster_gui/random_cluster_checker.py     | 171 +++++
+ fse22-artifact/create_overall_results.sh      |  19 +
+ fse22-artifact/daumenkino.sh                  |  30 +
+ fse22-artifact/graph_analysis.R               | 684 ++++++++++++++++++
+ fse22-artifact/meiomei.py                     |  22 +
+ fse22-artifact/meiomei.sh                     |  62 ++
+ fse22-artifact/paper-plots.R                  | 366 ++++++++++
+ fse22-artifact/pathLengthAnalysis.R           |  84 +++
+ fse22-artifact/prepare_gui.sh                 |  55 ++
+ fse22-artifact/randomise_cluster.py           |  32 +
+ fse22-artifact/section_graph.py               | 192 +++++
+ fse22-artifact/tikz_template.tex              |  21 +
+ fse22-artifact/util-networks-metrics.R        | 373 ++++++++++
+ tools/analyse_project.sh                      |  55 ++
+ 28 files changed, 2815 insertions(+), 7 deletions(-)
+ create mode 100755 analyses/ClusterSimilarity.R
+ create mode 100755 analyses/animate_test.R
+ create mode 100644 docker/pasta-fse22-stage1.dockerfile
+ create mode 100644 docker/pasta-fse22-stage2.dockerfile
+ create mode 100644 docker/pasta-fse22-stage3.dockerfile
+ create mode 100755 fse22-artifact/LoCMaintainersScript.sh
+ create mode 100644 fse22-artifact/cluster_gui/README.md
+ create mode 100755 fse22-artifact/cluster_gui/do_repro.sh
+ create mode 100755 fse22-artifact/cluster_gui/random_cluster_checker.py
+ create mode 100755 fse22-artifact/create_overall_results.sh
+ create mode 100755 fse22-artifact/daumenkino.sh
+ create mode 100755 fse22-artifact/graph_analysis.R
+ create mode 100755 fse22-artifact/meiomei.py
+ create mode 100755 fse22-artifact/meiomei.sh
+ create mode 100755 fse22-artifact/paper-plots.R
+ create mode 100644 fse22-artifact/pathLengthAnalysis.R
+ create mode 100755 fse22-artifact/prepare_gui.sh
+ create mode 100755 fse22-artifact/randomise_cluster.py
+ create mode 100755 fse22-artifact/section_graph.py
+ create mode 100644 fse22-artifact/tikz_template.tex
+ create mode 100644 fse22-artifact/util-networks-metrics.R
+ create mode 100755 tools/analyse_project.sh
+
+diff --git a/analyses/ClusterSimilarity.R b/analyses/ClusterSimilarity.R
+new file mode 100755
+index 0000000..64ce9e6
+--- /dev/null
++++ b/analyses/ClusterSimilarity.R
+@@ -0,0 +1,154 @@
++#!/usr/bin/env Rscript
++
++source("analyses/maintainers_graph_util.R")
++library(dplyr)
++
++# taken from website https://www.r-bloggers.com/2021/11/how-to-calculate-jaccard-similarity-in-r/
++jaccard <- function(df_a, df_b, c_a, c_b) {
++  df_a <- df_a[df_a$c_representative == c_a,]
++  df_b <- df_b[df_b$c_representative == c_b,]
++
++  intersection = length(intersect(df_a$c_section, df_b$c_section))
++  union = length(df_a$c_section) + length(df_b$c_section) - intersection
++  return (intersection/union)
++}
++
++#compare_clusters_adj_rand <- function(df_a, df_b, c_a, c_b) {
++#  df_a <- df_a[df_a$c_representative == c_a,]
++#  df_b <- df_b[df_b$c_representative == c_b,]
++#
++#  #intersection <- intersect(df_a$c_section, df_b$c_section)
++#  #min_set_size <- min(nrow(df_a), nrow(df_b))
++#  #intersect_coeff <- length(intersection)/min_set_size
++#  # the higher, the better
++#  rand_index <- adj.rand.index(df_a$c_section, df_b$c_section)
++#
++#  return(rand_index)
++#}
++
++data_dir_name <- file.path("resources", project, "resources/maintainers_cluster")
++csv_dst <- file.path("resources", project, "resources/maintainers_cluster_similarity.csv")
++other_dir_name <- file.path("resources", project, "resources/maintainers_cluster_louvain")
++
++methods <- c("louvain", "infomap", "fast_greedy")
++
++graphs <- list()
++graphs_rest <- list()
++
++files <- list.files(path = data_dir_name, pattern = "*.csv", full.names = TRUE, recursive = FALSE)
++files <- files[!grepl("-rc", files, fixed = TRUE)]
++files <- stringr::str_sort(files, numeric = TRUE)
++
++c_version <- c()
++c_clustering <- c()
++c_representative <- c()
++c_maxoverlap <- c()
++c_max_representative <- c()
++c_cluster_size <- c()
++
++for (file_name in files) {
++  print(paste0("Parsing file ", file_name, "..."))
++  cluster_df <- read.csv(file_name)
++  cluster_table <- table(cluster_df$c_representative)
++  for (m in methods){
++    other_dir_name <- paste(data_dir_name, m, sep = '_')
++    other_file_name <- file.path(other_dir_name, basename(file_name))
++    if (!file.exists(other_file_name)) {
++       print(paste0(other_file_name, " does not exist for clustering method ", m))
++       next
++    }
++    other_df <- read.csv(other_file_name)
++    
++    for (a in unique(cluster_df$c_representative)) {
++      max <- 0
++      max_rep <- NA
++      for (b in unique(other_df$c_representative)) {
++        overlap <- jaccard(cluster_df, other_df, a, b)
++        if (overlap > max) {
++          max <- overlap
++          max_rep <- b
++        }
++      }
++      c_version <- c(c_version, basename(file_name))
++      c_clustering <- c(c_clustering, m)
++      c_representative <- c(c_representative, a)
++      c_maxoverlap <- c(c_maxoverlap, max)
++      c_max_representative <- c(c_max_representative, max_rep)
++      c_cluster_size <- c(c_cluster_size, unname(cluster_table[a]))
++    }
++  }
++}
++
++df <- data.frame(c_version, c_clustering, c_representative, c_maxoverlap, c_max_representative, c_cluster_size)
++write.csv(df, csv_dst)
++
++#for (file_name in files) {
++#  file_map_name <- substr(basename(file_name), 1, nchar(basename(file_name))-4)
++#  file_map_name <- paste0(file_map_name, "_filemap.csv")
++#  file_map_name <- sub(basename(file_name), file_map_name, file_name)
++#  
++#  g_data <- maintainers_section_graph(file_name, project, file_map_name)
++#  g <- g_data$graph
++#  g$version <- basename(file_name)
++#  graphs_rest[[length(graphs_rest)+1]] <- g
++#}
++#
++#for (i in 1:length(files)) {
++#  #print(i)
++#  g <- graphs[[i]]
++#  g_rest <- graphs_rest[[i]]
++#  
++#  wt_comm <- cluster_walktrap(g)
++#  comm_groups <- igraph::groups(wt_comm)
++#  wt_comm_rest <- cluster_walktrap(g_rest)
++#  comm_groups_rest <- igraph::groups(wt_comm_rest)
++#  len_comm <- length(comm_groups)
++#  len_comm_rest <- length(comm_groups_rest)
++#  
++#  if(len_comm != len_comm_rest) {
++#    print("NOT THE SAME AMOUNT BY")
++#    print(len_comm - len_comm_rest)
++#    #next
++#  }
++#  
++#  print("HELLO?!?!?")
++#  # test if it's still the same if we delete the vertex "THE REST" and then test the clusters
++#  g_rest <- igraph::delete.vertices(g_rest, "THE REST")
++#  for (j in 1:len_comm) {
++#    #print(j)
++#    group <- comm_groups[[j]]
++#    memberships <- unname(membership(wt_comm)[group])
++#    max_overlap <- max(table(memberships))
++#    if (max_overlap != len_comm) {
++#      print(paste0("Overlap for group ", str(j), " was ", str(max_overlap/length(group))))
++#    }
++#  }
++#}
++#
++#file_name <- "resources/linux/resources/maintainers_section_graph/v5.15.csv"
++#p <- "linux"
++#file_map_name <- substr(basename(file_name), 1, nchar(basename(file_name))-4)
++#file_map_name <- paste0(file_map_name, "_filemap.csv")
++#file_map_name <- sub(basename(file_name), file_map_name, file_name)
++#
++#g_data <- maintainers_section_graph(p, file_name, file_map_name)
++#g <- g_data$graph
++#meta_g <- g_data$meta
++#
++#comm_groups <- g_data$comm_groups
++#c_representative <- c()
++#c_section <- c()
++#c_size <- c()
++#for (n in sort(V(meta_g)$name)) {
++#  # get the index associated with the node in the meta graph
++#  index <- V(meta_g)[n]$index
++#  # the index will correlate to the list in comm_groups, which are
++#  # its sections
++#  sections <- unname(comm_groups[index])[[1]]
++#  c_representative[(length(c_representative)+1):(length(c_representative)+length(sections))] <- n
++#  c_section <- c(c_section, sections)
++#  c_size <- c(c_size, V(g_data$g)[sections]$size)
++#}
++#df <- data.frame(c_representative, c_section, c_size)
++#df <- df[order(c_representative, c_section),]
++#write.table(df, dst, row.names=FALSE, sep = ",")
+diff --git a/analyses/animate_test.R b/analyses/animate_test.R
+new file mode 100755
+index 0000000..bd5b825
+--- /dev/null
++++ b/analyses/animate_test.R
+@@ -0,0 +1,261 @@
++#!/usr/bin/env Rscript
++
++library(ggraph)
++library(igraph)
++#library(gganimate)
++library(graphlayouts)
++#library(patchwork)
++library(RColorBrewer)
++
++source("analyses/maintainers_graph_util.R")
++# TODO: delete and sort out old comments and work, sort work
++args <- commandArgs(trailingOnly = TRUE)
++if (length(args) == 0) {
++  data_dir_name <- file.path("resources", project, "resources/maintainers_section_graph")
++  d_dst <- file.path("resources", project, "resources/maintainers_daumenkino")
++} else {
++  data_dir_name <- args[1]
++  d_dst <- args[2]
++}
++dir.create(d_dst, showWarnings = FALSE, recursive = TRUE)
++
++files <- list.files(path = data_dir_name, pattern = "*.csv", full.names = TRUE, recursive = FALSE)
++files <- files[!grepl("-rc", files, fixed = TRUE)]
++files <- files[!grepl("filemap", files, fixed = TRUE)]
++files <- stringr::str_sort(files, numeric = TRUE)
++# the first 17 versions of qemu do not contain any edges between clusters. We don't need to look at those
++if (project == "qemu") {
++  files <- files[18:79]
++}
++
++graphs <- list()
++
++#g_v1 is the previous graph, g_v2 is the follower. node_name is ONE node of g_v2
++find_largest_predecessor <- function(g_v1, g_v2, node_name) {
++  version1 <- g_v1$version
++  version2 <- g_v2$version
++
++  version1_file_name <-
++    file.path("resources", project, "resources/maintainers_cluster", version1)
++  version2_file_name <-
++    file.path("resources", project, "resources/maintainers_cluster", version2)
++
++  df_1 <- read.csv(version1_file_name)
++  df_2 <- read.csv(version2_file_name)
++
++  # calculate cluster overlap for every single name in previous version, get
++  # the max overlap
++  max <- which.max(sapply(V(g_v1)$name,
++                          function(x) compare_cluster_csv(df_1, df_2, x, node_name)))
++  df_2 <- df_2[df_2$c_representative == node_name,]
++  max_name <- names(max)
++  # case 1: sapply returns a named array, e.g. 'ARM PORT': 3. We are only interested
++  # in the given name, if > 0, since 0 would mean a 0 overlap
++  # case 2: if the previous name (max) is not the same as the next one (node_name), we
++  # have to determine if max is still within the cluster, therefore having a
++  # change of representative. Otherwise, the
++  # clusters have diverted and we need to assign a new value to node_name, therefore
++  # giving it NA as predecessor, which will result in keeping the original colour
++  condition_cluster_diverted <- (max_name != node_name ) && !(max_name %in% df_2$c_section)
++  if ((unname(max) == 0) || condition_cluster_diverted) {
++    max <- NA
++  } else {
++    max <- max_name
++  }
++
++  return(max)
++}
++
++for (file_name in files) {
++  file_map_name <- substr(basename(file_name), 1, nchar(basename(file_name))-4)
++  file_map_name <- paste0(file_map_name, "_filemap.csv")
++  file_map_name <- sub(basename(file_name), file_map_name, file_name)
++  
++  g_data <- maintainers_section_graph(project, file_name, file_map_name)
++  g <- g_data$meta
++  g$version <- basename(file_name)
++  graphs[[length(graphs)+1]] <- g
++}
++
++qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
++col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
++palette_index <- 1
++graph_palette <- list()
++pList <- vector("list", length(graphs))
++lList <- vector("list", length(graphs))
++
++for (i in 1:length(graphs)) {
++  #print(i)
++  g <- graphs[[i]]
++  Isolated = which(degree(g)==0)
++  #TODO: das iwie rechtfertigen, weil es schaut hald echt schlecht aus
++  g = delete.vertices(g, Isolated)
++  
++  quantile_step <- "95%"
++  quantiles <- quantile(V(g)$size, c(.90, .95, .98, .99)) 
++  communities <- cluster_louvain(g)
++  V(g)$clu <- as.character(membership(communities))
++  #V(g)$col <- unname(sapply(V(g)$clu, function(x) test[as.numeric(x)]))
++  # TODO: something better?
++  V(g)$col <- "black"
++
++  graphs[[i]] <- g
++
++  ## Every community of nodes is supposed to be coloured like its biggest node
++  ## Step #1: find largest node per community
++  #community_max <- c()
++  #for (j in 1:length(communities)){
++  #  #max_comm_size <- max(V(g)[communities[[j]]]$size)
++  #  maximum_name <- V(g)[communities[[j]]][which.max(V(g)[communities[[j]]]$size)]$name
++  #  community_max[j] <- maximum_name
++  #}
++
++  # Step #2: assign unique colour for largest quantile nodes
++  graphs_largest <- V(g)[which(V(g)$size >= quantiles[quantile_step])]$name
++  if (i > 1) {
++    # get a named list where every new node is mapped to his predecessor
++    graphs_largest_pre <- sapply(graphs_largest,
++                                 function(x) find_largest_predecessor(graphs[[i-1]], g, x))
++    # remove NA values, new nodes will be detected later anyway
++    graphs_largest_pre <- graphs_largest_pre[!is.na(graphs_largest_pre)]
++
++    predecessors_in_palette <- intersect(unname(graphs_largest_pre), names(graph_palette))
++    if (length(predecessors_in_palette) > 0) {
++      # get the new names for the palette by searching for their predecessors in the palette
++      next_for_palette <- names(which(graphs_largest_pre == predecessors_in_palette))
++      # rename them by matching their name to their predecessor, keep the same colour
++      for (n in next_for_palette) {
++        # get index of name to replace
++        index <- which(names(graph_palette) == unname(graphs_largest_pre[n]))
++        names(graph_palette)[index] <- n
++      }
++    }
++  }
++  missing <- setdiff(graphs_largest, names(graph_palette))
++  for (m in missing) {
++    #graph_palette[m] <- large_colour_palette[palette_index]
++    graph_palette[m] <- col_vector[palette_index]
++    #graph_palette[m] <- got_palette[palette_index]
++    palette_index <- palette_index + 1
++  }
++
++  # Step #3: colour entire cluster of largest sections according to their 
++  # unique colour IF they are the community largest
++  #for (l in graphs_largest) {
++  #  if (l %in% community_max) {
++  #    comm_index <- membership(communities)[l]
++  #    comm_nodes <- communities[[comm_index]]
++  #    V(g)[comm_nodes]$col <- graph_palette[l]
++  #  }
++  #}
++  # to avoid overwriting colour of largest node, let's manually assign it again
++  for (l in graphs_largest) {
++    V(g)[l]$col <- graph_palette[l]
++  }
++
++  # TODO: doing some double work here. If we already saw any of the
++  # nodes, assign them their previous colour again
++  for (l in V(g)$name) {
++    if (l %in% names(graph_palette)){
++      V(g)[l]$col <- graph_palette[l]
++    } else {
++      V(g)[l]$col <- "black"
++    }
++  }
++
++  graph_name <- substr(g$version, 1, nchar(g$version)-4)
++  g_layout <- create_layout(g, layout = "dh")
++  lList[[i]] <- g_layout
++  #pList[[i]] <- ggraph(g, layout = "stress") +
++  pList[[i]] <- ggraph(g_layout) +
++  geom_edge_link0(aes(edge_width = weight),edge_colour = "grey66")+
++  #geom_node_point(aes(fill = clu,size = size),shape = 21)+
++  geom_node_point(aes(fill = col, size = size),shape = 21)+
++  geom_node_text(aes(filter = size >= unname(quantiles[quantile_step]), label = name),family="serif", size=4)+
++  #scale_fill_manual(values = got_palette)+
++  scale_edge_width(range = c(0.2,3))+
++  scale_size(range = c(1,6))+
++  theme_graph(base_family = "Helvetica")+
++  theme(legend.position = "none") +
++  ggtitle(graph_name)
++
++  pList[[i]]
++  
++  graph_file_name <- file.path(d_dst, paste0(graph_name, ".pdf"))
++  pdf(graph_file_name, width = 15, height = 10)
++  plot(pList[[i]])
++  dev.off()
++}
++
++#i <- 1
++#while ((i+3)<=length(pList)) {
++#  graph_file_name <- file.path(d_dst, paste0("graphs_", i, ".pdf"))
++#  pdf(graph_file_name, width = 15, height = 10)
++#  grid.arrange(pList[[i]], pList[[i+1]], pList[[i+2]], pList[[i+3]])
++#  dev.off()
++#  i <- i+4
++#}
++# TODO: die letzten 1-3 Plots noch mitnehmen
++
++####################### ANIMATION TESTS
++#
++#nodes_lst <- lapply(1:length(graphs), function(i) {
++#  cbind(igraph::as_data_frame(graphs[[i]], "vertices"),
++#        x = lList[[i]][, 1], y = lList[[i]][, 2], frame = i
++#  )
++#})
++#
++#edges_lst <- lapply(1:length(graphs), function(i) cbind(igraph::as_data_frame(graphs[[i]], "edges"), frame = i))
++#edges_lst <- lapply(1:length(graphs), function(i) {
++#  edges_lst[[i]]$x <- nodes_lst[[i]]$x[match(edges_lst[[i]]$from, nodes_lst[[i]]$name)]
++#  edges_lst[[i]]$y <- nodes_lst[[i]]$y[match(edges_lst[[i]]$from, nodes_lst[[i]]$name)]
++#  edges_lst[[i]]$xend <- nodes_lst[[i]]$x[match(edges_lst[[i]]$to, nodes_lst[[i]]$name)]
++#  edges_lst[[i]]$yend <- nodes_lst[[i]]$y[match(edges_lst[[i]]$to, nodes_lst[[i]]$name)]
++#  edges_lst[[i]]$id <- paste0(edges_lst[[i]]$from, "-", edges_lst[[i]]$to)
++#  edges_lst[[i]]$status <- TRUE
++#  edges_lst[[i]]
++#})
++#
++#all_edges <- do.call("rbind", lapply(graphs, get.edgelist))
++#all_edges <- all_edges[!duplicated(all_edges), ]
++#all_edges <- cbind(all_edges, paste0(all_edges[, 1], "-", all_edges[, 2]))
++#
++## TODO: idk, get this to work?
++##edges_lst <- lapply(1:length(graphs), function(i) {
++##  idx <- which(!all_edges[, 3] %in% edges_lst[[i]]$id)
++##  if (length(idx != 0)) {
++##    tmp <- data.frame(from = all_edges[idx, 1], to = all_edges[idx, 2], id = all_edges[idx, 3])
++##    tmp$x <- nodes_lst[[i]]$x[match(tmp$from, nodes_lst[[i]]$name)]
++##    tmp$y <- nodes_lst[[i]]$y[match(tmp$from, nodes_lst[[i]]$name)]
++##    tmp$xend <- nodes_lst[[i]]$x[match(tmp$to, nodes_lst[[i]]$name)]
++##    tmp$yend <- nodes_lst[[i]]$y[match(tmp$to, nodes_lst[[i]]$name)]
++##    tmp$frame <- i
++##    tmp$status <- FALSE
++##    edges_lst[[i]] <- rbind(edges_lst[[i]], tmp)
++##  }
++##  edges_lst[[i]]
++##})
++#
++#edges_df <- do.call("rbind", edges_lst)
++#nodes_df <- do.call("rbind", nodes_lst)
++#
++#p <- ggplot() +
++#  geom_segment(
++#    data = edges_df,
++#    aes(x = x, xend = xend, y = y, yend = yend, group = id, alpha = status),
++#    show.legend = FALSE
++#  ) +
++#  geom_point(
++#    data = nodes_df, aes(x, y, fill = col, group = name),
++#    shape = 21, size = 4, show.legend = FALSE
++#  ) +
++#  scale_fill_manual(values = c("forestgreen", "grey25", "firebrick")) +
++#  scale_alpha_manual(values = c(0, 1)) +
++#  ease_aes("quadratic-in-out") +
++#  transition_states(frame, state_length = 0.5, wrap = FALSE) +
++#  labs(title = "Wave {closest_state}") +
++#  theme_void()
++#
++#animate(plot = p, renderer = gifski_renderer())
++#
++#
+diff --git a/analyses/maintainers_graph_util.R b/analyses/maintainers_graph_util.R
+index b0e949a..07d7b44 100644
+--- a/analyses/maintainers_graph_util.R
++++ b/analyses/maintainers_graph_util.R
+@@ -38,7 +38,7 @@ generate_cluster_matrix <- function(file_map, wt_comm, dimension) {
+ }
+ # function to generate the maintainers_section_graph, its communities,
+ # its groups and bounds in a list in said order
+-maintainers_section_graph <- function(project, file_name, file_map_name, sanitize = FALSE) {
++maintainers_section_graph <- function(project, file_name, file_map_name, clustering_method = NA, sanitize = FALSE) {
+   data_frame <- read_csv(file_name)
+   file_map <- read.csv(file_map_name, header = TRUE)
+   # solution taken from https://stackoverflow.com/questions/18893390/splitting-on-comma-outside-quotes
+@@ -87,8 +87,19 @@ maintainers_section_graph <- function(project, file_name, file_map_name, sanitiz
+   #  g <- igraph::delete.vertices(g, V(g)[grepl("DRIVER", toupper(V(g)$name))])
+   #}
+ 
+-  # get walktrap clustering
++  # get clustering
+   ret_wt_comm <- cluster_walktrap(g)
++  #ret_wt_comm <- cluster_louvain(g)
++  #ret_wt_comm <- cluster_fast_greedy(g)
++  #ret_wt_comm <- cluster_infomap(g)
++
++  if (clustering_method == "_louvain") {
++    ret_wt_comm <- cluster_louvain(g)
++  } else if (clustering_method == "_infomap") {
++    ret_wt_comm <- cluster_infomap(g)
++  } else if (clustering_method == "_fast_greedy") {
++    ret_wt_comm <- cluster_fast_greedy(g)
++  }
+ 
+   # get number of existing clusters within graph as bounds for processing
+   ret_comm_groups <- igraph::groups(ret_wt_comm)
+@@ -144,3 +155,39 @@ write_cluster_csv <- function(g_data, dst) {
+ 
+   write.table(df, dst, row.names=FALSE, sep = ",", qmethod='double')
+ }
++
++write_cluster_csv <- function(g_data, dst) {
++  meta_g <- g_data$meta
++  comm_groups <- g_data$comm_groups
++
++  c_representative <- c()
++  c_section <- c()
++  c_size <- c()
++
++  for (n in sort(V(meta_g)$name)) {
++    # get the index associated with the node in the meta graph
++    index <- V(meta_g)[n]$index
++    # the index will correlate to the list in comm_groups, which are
++    # its sections
++    sections <- unname(comm_groups[index])[[1]]
++
++    c_representative[(length(c_representative)+1):(length(c_representative)+length(sections))] <- n
++    c_section <- c(c_section, sections)
++    c_size <- c(c_size, V(g_data$g)[sections]$size)
++  }
++  df <- data.frame(c_representative, c_section, c_size)
++  df <- df[order(c_representative, c_section),]
++
++  write.table(df, dst, row.names=FALSE, sep = ",")
++}
++
++compare_cluster_csv <- function(df_a, df_b, c_a, c_b) {
++  df_a <- df_a[df_a$c_representative == c_a,]
++  df_b <- df_b[df_b$c_representative == c_b,]
++
++  intersection <- intersect(df_a$c_section, df_b$c_section)
++  min_set_size <- min(nrow(df_a), nrow(df_b))
++  intersect_coeff <- length(intersection)/min_set_size
++
++  return(intersect_coeff)
++}
+diff --git a/analyses/maintainers_section_graph.R b/analyses/maintainers_section_graph.R
+index 0f93231..ad4aac9 100755
+--- a/analyses/maintainers_section_graph.R
++++ b/analyses/maintainers_section_graph.R
+@@ -42,9 +42,12 @@ if (length(args) == 0) {
+   version <- args[1]
+ }
+ 
++d_dst <- file.path(d_maintainers_cluster_img, version)
+ f_section_graph <- file.path(d_maintainers_section, paste(version, 'csv', sep='.'))
+ f_file_map <- file.path(d_maintainers_section, paste0(version, '_filemap', '.csv'))
+ 
++clustering_method <- ""
++
+ if ("--print-entire-graph" %in% args) {
+ 	PRINT_ENTIRE_GRAPH <- TRUE
+ }
+@@ -53,12 +56,25 @@ if ("--print-clusters" %in% args) {
+ 	PRINT_CLUSTERS <- TRUE
+ }
+ 
++if ("--louvain" %in% args) {
++	clustering_method <- "_louvain"
++}
++
++if ("--infomap" %in% args) {
++	clustering_method <- "_infomap"
++}
++
++if ("--fast_greedy" %in% args) {
++	clustering_method <- "_fast_greedy"
++}
++
+ create_dstdir(c())
+ 
++d_maintainers_cluster <- paste0(d_maintainers_cluster, clustering_method)
+ dir.create(d_maintainers_cluster, showWarnings = FALSE)
+ CLUSTER_DESTINATION <- file.path(d_maintainers_cluster, paste(version, 'csv', sep='.'))
+ 
+-graph_list <- maintainers_section_graph(project, f_section_graph, f_file_map)
++graph_list <- maintainers_section_graph(project, f_section_graph, f_file_map, clustering_method)
+ g <- graph_list$graph
+ wt_comm <- graph_list$wt_comm
+ comm_groups <- graph_list$comm_groups
+diff --git a/analyses/util.R b/analyses/util.R
+index 351b9d7..3f29f67 100644
+--- a/analyses/util.R
++++ b/analyses/util.R
+@@ -20,9 +20,10 @@ project <- read.csv('config', header=FALSE)$V1
+ d_resources <- file.path('resources', project, 'resources')
+ d_maintainers_section <- file.path(d_resources, 'maintainers_section_graph')
+ d_maintainers_cluster <- file.path(d_resources, 'maintainers_cluster')
++d_maintainers_cluster_img <- file.path(d_resources, 'maintainers_cluster_img')
+ 
+-WIDTH <- 6.3
+-HEIGHT <- 5
++WIDTH <- 7
++HEIGHT <- 3.5
+ 
+ my.theme <- theme_bw(base_size = 8) +
+             theme(legend.position = "top")
+@@ -46,7 +47,11 @@ printplot <- function(p, filename, ...) {
+   #plot(p, ...)
+   #dev.off()
+ 
+-  tikz(paste0(filename, '.tex'), width = WIDTH, height = HEIGHT, sanitize=TRUE, standAlone = TRUE)
++  tikz(paste0(filename, '_standalone.tex'), width = WIDTH, height = HEIGHT, sanitize=TRUE, standAlone = TRUE)
++  plot(p, ...)
++  dev.off()
++
++  tikz(paste0(filename, '.tex'), width = WIDTH, height = HEIGHT, sanitize=TRUE, standAlone = FALSE)
+   plot(p, ...)
+   dev.off()
+ }
+diff --git a/bin/pasta_maintainers_stats.py b/bin/pasta_maintainers_stats.py
+index d77bb81..cb59674 100644
+--- a/bin/pasta_maintainers_stats.py
++++ b/bin/pasta_maintainers_stats.py
+@@ -160,6 +160,9 @@ def generate_graph(config, revision, maintainers, file_map, file_filters):
+             line = [a, b, ctr_edge['lines'], ctr_edge['size']]
+             csv_writer.writerow(line)
+     call(['./analyses/maintainers_section_graph.R', revision])
++    call(['./analyses/maintainers_section_graph.R', revision, '--louvain'])
++    call(['./analyses/maintainers_section_graph.R', revision, '--infomap'])
++    call(['./analyses/maintainers_section_graph.R', revision, '--fast_greedy'])
+ 
+ 
+ def maintainers_stats(config, argv):
+diff --git a/docker/build.sh b/docker/build.sh
+index 621ae75..9a279fb 100755
+--- a/docker/build.sh
++++ b/docker/build.sh
+@@ -28,6 +28,21 @@ case $type in
+ "linux")
+ 	build_container base
+ 	;;
++"fse22-stage1")
++	build_container base
++	build_container linux
++	;;
++"fse22-stage2")
++	build_container base
++	build_container linux
++	build_container fse22-stage1
++	;;
++"fse22-stage3")
++	build_container base
++	build_container linux
++	build_container fse22-stage1
++	build_container fse22-stage2
++	;;
+ "icse-artifact")
+ 	build_container base
+ 	build_container linux
+diff --git a/docker/pasta-fse22-stage1.dockerfile b/docker/pasta-fse22-stage1.dockerfile
+new file mode 100644
+index 0000000..fee026f
+--- /dev/null
++++ b/docker/pasta-fse22-stage1.dockerfile
+@@ -0,0 +1,25 @@
++FROM pasta:linux
++
++MAINTAINER Anon ymous "anonymous@foo.com"
++
++## 1. Prepare resources
++# Take linux/2011 as base
++WORKDIR /home/pasta/PaStA/resources
++
++# FIXME! Pin this to a git tag
++RUN git checkout linux/2011
++
++## 2. Initialise submodules
++RUN git submodule init
++# repositories: only for our target projects
++RUN git submodule update u-boot/repo qemu/repo linux/repo xen/repo
++# Mailing lists: only for our targets, except Linux
++# u-boot
++RUN git submodule update u-boot/resources/mbox/pubin/lists.denx.de/u-boot/0.git
++# xen (symlinked)
++RUN git submodule update linux/resources/mbox/pubin/lists.xenproject.org
++# qemu (symlinked)
++RUN git submodule update linux/resources/mbox/pubin/nongnu.org
++
++# Switch to latest & greatest resources
++RUN git submodule foreach git reset --hard origin/master
+diff --git a/docker/pasta-fse22-stage2.dockerfile b/docker/pasta-fse22-stage2.dockerfile
+new file mode 100644
+index 0000000..4d86301
+--- /dev/null
++++ b/docker/pasta-fse22-stage2.dockerfile
+@@ -0,0 +1,41 @@
++FROM pasta:fse22-stage1
++
++MAINTAINER Anon ymous "anonymous@foo.com"
++
++# Generate clusters and analysis results
++WORKDIR /home/pasta/PaStA
++### FIXME REMOVE THIS WHEN FINISHED WITH PREPARATION
++RUN git checkout fse22-artifact
++
++# Linux analysis - the short way
++WORKDIR /home/pasta/PaStA/resources/linux/resources
++RUN lzma -dv patch-groups.lzma characteristics.csv.lzma
++WORKDIR /home/pasta/PaStA
++
++RUN ./tools/analyse_project.sh linux
++RUN ./tools/analyse_project.sh u-boot
++RUN ./tools/analyse_project.sh xen
++RUN ./tools/analyse_project.sh qemu
++
++# Concatenate Results - Create plots from paper
++WORKDIR /home/pasta/PaStA/resources
++RUN ./concatenate_results.sh
++
++WORKDIR /home/pasta/PaStA
++RUN ./fse22-artifact/create_overall_results.sh
++
++# Create randomised clusters for cross-checking
++# Always take the latest major release of each project
++ENV V_XEN=RELEASE-4.15.0
++ENV V_U_BOOT=v2021.07
++ENV V_QEMU=v6.1.0
++ENV V_LINUX=v5.14
++
++RUN ./fse22-artifact/prepare_gui.sh xen $V_XEN
++RUN ./fse22-artifact/prepare_gui.sh u-boot $V_U_BOOT
++RUN ./fse22-artifact/prepare_gui.sh qemu $V_QEMU
++RUN ./fse22-artifact/prepare_gui.sh linux $V_LINUX
++
++WORKDIR /home/pasta/PaStA/fse22-artifact
++RUN mkdir -p /home/pasta/results && tar -czf /home/pasta/results/cluster_gui.tar.gz ./cluster_gui
++WORKDIR /home/pasta/PaStA
+diff --git a/docker/pasta-fse22-stage3.dockerfile b/docker/pasta-fse22-stage3.dockerfile
+new file mode 100644
+index 0000000..e522da8
+--- /dev/null
++++ b/docker/pasta-fse22-stage3.dockerfile
+@@ -0,0 +1,7 @@
++FROM pasta:fse22-stage2
++
++MAINTAINER Anon ymous "anonymous@foo.com"
++
++# Clone all MLs that are related to linux
++WORKDIR /home/pasta/PaStA/resources/linux
++RUN git submodule update .
+diff --git a/docker/pasta-skeleton.dockerfile b/docker/pasta-skeleton.dockerfile
+index 7b0113f..19a6e48 100644
+--- a/docker/pasta-skeleton.dockerfile
++++ b/docker/pasta-skeleton.dockerfile
+@@ -26,6 +26,9 @@ RUN apt install -y --no-install-recommends \
+ 	libpng-dev \
+ 	locales \
+ 	patchutils \
++	pbzip2 \
++	pdftk \
++	poppler-utils \
+ 	procmail \
+ 	python3-dev \
+ 	python3-flaskext.wtf \
+@@ -63,4 +66,4 @@ ENV R_LIBS_USER /home/pasta/R/
+ RUN mkdir -p $HOME/.R $R_LIBS_USER
+ RUN echo MAKEFLAGS = -j$(($(nproc)/4)) > ~/.R/Makevars
+ 
+-RUN R -e "install.packages(c('assertthat', 'dplyr', 'ggplot2', 'igraph', 'lubridate', 'reshape2', 'RColorBrewer', 'tikzDevice'), Ncpus = 4, clean = TRUE, lib = '${R_LIBS_USER}')"
++RUN R -e "install.packages(c('assertthat', 'dplyr', 'ggplot2', 'ggraph', 'ggplot2', 'graphlayouts', 'igraph', 'ineq', 'lubridate', 'reshape2', 'RColorBrewer', 'tikzDevice'), Ncpus = 4, clean = TRUE, lib = '${R_LIBS_USER}')"
+diff --git a/fse22-artifact/LoCMaintainersScript.sh b/fse22-artifact/LoCMaintainersScript.sh
+new file mode 100755
+index 0000000..740cf30
+--- /dev/null
++++ b/fse22-artifact/LoCMaintainersScript.sh
+@@ -0,0 +1,36 @@
++#!/usr/bin/bash
++
++set -e
++
++echo "Project,Version,No-Mtrs,LoC,No-Sections,No-Clusters,No-CommitsLastVersion"
++for project in linux qemu u-boot xen
++do
++	cd "resources/$project/repo"
++	
++	versions=$(git tag --merged origin/master | grep -v -- -rc)
++
++	if [[ $project == "xen" ]]; then
++		versions=$(git tag --merged origin/master)
++	fi
++
++	for version in $versions; do
++		cluster="../resources/maintainers_cluster/$version.csv"
++		if [ ! -f $cluster ]; then
++			continue
++		fi
++
++		last_version=$(git tag --merged origin/master | grep -v -- -rc | grep $version -B 1 | head -n 1)
++
++	        mtrs=$(git show $version:./MAINTAINERS | grep -a "^M:" | sort | uniq | wc -l)
++		loc=$(git ls-tree -r $version | grep blob | awk '{print $3}' | xargs -P $(nproc) -n 1 git --no-pager show  | wc -l)
++		sections=$(cat $cluster | tail -n +2 | wc -l)
++		clusters=$(cat $cluster | cut -d, -f1 | tail -n +2 | sort | uniq | wc -l)
++		#maintainers_changes_total=$(git log --no-merges --pretty=format:%an --follow -- MAINTAINERS | wc -l)
++		#maintainers_changes_last_version=$(git log $last_version..$version --no-merges --pretty=format:%an --follow -- MAINTAINERS | wc -l)
++		commits_last_version=$(git log $last_version..$version --no-merges --pretty=format:%h | wc -l)
++		echo "$project,$version,$mtrs,$loc,$sections,$clusters,$commits_last_version"
++	done
++	cd -
++done
++
++
+diff --git a/fse22-artifact/cluster_gui/README.md b/fse22-artifact/cluster_gui/README.md
+new file mode 100644
+index 0000000..6fb4e3e
+--- /dev/null
++++ b/fse22-artifact/cluster_gui/README.md
+@@ -0,0 +1,22 @@
++Compare Real-World Clusters against Random Clusters
++===================================================
++
++Usage
++-----
++Simply run the dispatcher:
++$ ./do\_repro.sh
++
++The dispatcher will start the reproduction for each project (Linux, U-Boot,
++QEMU, Xen). In the text field, enter your guess which cluster is the REAL one
++(i.e., 'l' or 'r'). If you are uncertain, enter '?'. You can skip clusters. The
++green text color indicates that the cluster has already been marked. You can
++edit your choice at any time.
++
++After finishing, please zip the directory and send it back to:
++
++    anonymous@foo.com
++
++Requirements
++------------
++
++Please install python3 and Tkinter.
+diff --git a/fse22-artifact/cluster_gui/do_repro.sh b/fse22-artifact/cluster_gui/do_repro.sh
+new file mode 100755
+index 0000000..1b5f314
+--- /dev/null
++++ b/fse22-artifact/cluster_gui/do_repro.sh
+@@ -0,0 +1,7 @@
++#!/bin/bash
++
++set -e
++
++for project in ./*-*; do
++	./random_cluster_checker.py $project
++done
+diff --git a/fse22-artifact/cluster_gui/random_cluster_checker.py b/fse22-artifact/cluster_gui/random_cluster_checker.py
+new file mode 100755
+index 0000000..91572ad
+--- /dev/null
++++ b/fse22-artifact/cluster_gui/random_cluster_checker.py
+@@ -0,0 +1,171 @@
++#!/usr/bin/env python3
++
++from collections import defaultdict
++from tkinter import *
++from tkinter import font
++from PIL import ImageTk, Image
++import glob
++import os
++import sys
++
++
++def parse_csv(filename, must_exist):
++    retval = defaultdict(str)
++    if not os.path.isfile(filename) and not must_exist:
++        return retval
++
++    with open(filename, 'r') as f:
++        content = f.read().strip().split('\n')
++    for line in content:
++        filename, direction = [x.strip() for x in line.split(',')]
++        retval[filename] = direction
++    return retval
++
++
++def check_cluster_marked(el):
++    return len(guess_dict[el])
++
++
++def select_cluster(event):
++    selection = event.widget.curselection()
++    if selection:
++        index = selection[0]
++        data = event.widget.get(index)
++
++        global curr_cluster
++        curr_cluster = data
++
++        # Get the guess for the current cluster
++        note = guess_dict[curr_cluster]
++        e_check.delete(0, END)
++        e_check.insert(0, note)
++
++        path1 = os.path.join(d_cluster_img, "random_" + data)
++        path2 = os.path.join(d_cluster_img, data)
++        correct_side = solution_dict[curr_cluster]
++
++        if correct_side == 'r':
++            global image1
++            global image2
++            image1 = Image.open(path1)
++            image2 = Image.open(path2)
++
++            global photo1
++            global photo2
++            photo1 = ImageTk.PhotoImage(image1)
++            photo2 = ImageTk.PhotoImage(image2)
++        else:
++            image1 = Image.open(path2) # paths are switched
++            image2 = Image.open(path1)
++
++            photo1 = ImageTk.PhotoImage(image1)
++            photo2 = ImageTk.PhotoImage(image2)
++            
++        canvas1.itemconfig(image_container1, image=photo1)
++        canvas2.itemconfig(image_container2, image=photo2)
++
++
++def mark_cluster():
++    mark = e_check.get()
++    guess_dict[curr_cluster] = mark.strip()
++    with open(output_file, 'w') as f:
++        for key, value in guess_dict.items():
++            f.write('%s, %s\n' % (key, value.strip()))
++
++    lb.itemconfigure(lb.curselection(), fg="green" if check_cluster_marked(curr_cluster) else "black")
++
++
++def zoom1(factor):
++    global photo1
++    global image1
++    new_size = (int(image1.size[0] * factor), int(image1.size[1] * factor))
++
++    image1 = image1.resize(new_size, Image.ANTIALIAS)
++    photo1 = ImageTk.PhotoImage(image1)
++    canvas1.itemconfigure(image_container1, image=photo1)  # update image
++
++
++def zoom2(factor):
++    global photo2
++    global image2
++    new_size = (int(image2.size[0] * factor), int(image2.size[1] * factor))
++    image2 = image2.resize(new_size, Image.ANTIALIAS)
++    photo2 = ImageTk.PhotoImage(image2)
++    canvas2.itemconfigure(image_container2, image=photo2)  # update image
++
++
++d_cluster_img = sys.argv[1]
++output_file = os.path.join(d_cluster_img, "guess.csv")
++solution_file = os.path.join(d_cluster_img, "solution.csv")
++
++random_clusters = glob.glob(os.path.join(d_cluster_img, 'random_*.png'))
++clusters = glob.glob(os.path.join(d_cluster_img, 'cluster_*.png'))
++curr_cluster = ""
++
++solution_dict = parse_csv(solution_file, must_exist=True)
++guess_dict = parse_csv(output_file, must_exist=False)
++
++root = Tk()
++root.title("Random Cluster Checker -- %s" % (os.path.basename(d_cluster_img)))
++
++root.grid_rowconfigure(2, weight=7)
++root.grid_columnconfigure((0), weight=7)
++root.grid_columnconfigure((4), weight=5)
++
++# ROW 0
++msg = Message(root, text="Left cluster is real: l\n"
++                         "Right cluster is real: r\n"
++                         "No guess: ?\n", font=(None, 9), width=250)
++msg.grid(row=0, column=3, padx=13, pady=5, sticky=N+W, columnspan=2)
++
++ffs = font.Font(family='Courier', size=10)
++
++lb = Listbox(root, width=30, bd=1, selectmode='single', font=ffs, exportselection=False)
++lb.grid(row=0, column=2, padx=5, pady=5, sticky=W+E+S, columnspan=1, rowspan=2)
++lb.bind('<<ListboxSelect>>', select_cluster)
++
++# populate the clusters
++for f in clusters:
++    lb.insert(END, os.path.basename(f))
++    lb.itemconfig(END, fg="green" if check_cluster_marked(os.path.basename(f)) else "black")
++
++yscroll0 = Scrollbar(command=lb.yview, orient=VERTICAL)
++yscroll0.grid(row=0, column=3, sticky=N+S+W, rowspan=2)
++lb.configure(yscrollcommand=yscroll0.set)
++
++e_check = Entry(root, width=35, bd=1, )
++e_check.grid(row=0, column=4, padx=5, sticky=W+E+S)
++
++# ROW 1
++b1 = Button(root, text="Mark", command=mark_cluster)
++b1.grid(row=1, column=4, padx=5, sticky=N+W)
++
++canvas1 = Canvas(root)
++
++# take the first one as default
++image1 = Image.open(clusters[0])
++photo1 = ImageTk.PhotoImage(image1)
++image_container1 = canvas1.create_image((0, 0), anchor=NW, image=photo1)
++
++canvas1.bind('<ButtonPress-1>', lambda event: canvas1.scan_mark(event.x, event.y))
++canvas1.bind("<B1-Motion>", lambda event: canvas1.scan_dragto(event.x, event.y, gain=1))
++
++canvas1.grid(row=2, column=0, sticky=N+S+W+E, columnspan=1)
++
++Button(root, text='+', command=lambda: zoom1(1.1)).grid(row=3, column=0, sticky='nwe')
++Button(root, text='-', command=lambda: zoom1(0.9)).grid(row=4, column=0, sticky='nwe')
++
++canvas2 = Canvas(root)
++
++image2 = Image.open(random_clusters[0])
++photo2 = ImageTk.PhotoImage(image2)
++image_container2 = canvas2.create_image(0, 0, anchor=NW, image=photo2)
++
++canvas2.bind('<ButtonPress-1>', lambda event: canvas2.scan_mark(event.x, event.y))
++canvas2.bind("<B1-Motion>", lambda event: canvas2.scan_dragto(event.x, event.y, gain=1))
++canvas2.grid(row=2, column=2, sticky=N+S+W+E, columnspan=3)
++
++Button(root, text='+', command=lambda: zoom2(1.1)).grid(row=3, column=2, columnspan=3, sticky='nwe')
++Button(root, text='-', command=lambda: zoom2(0.9)).grid(row=4, column=2, columnspan=3, sticky='nwe')
++
++mainloop()
+diff --git a/fse22-artifact/create_overall_results.sh b/fse22-artifact/create_overall_results.sh
+new file mode 100755
+index 0000000..f85069c
+--- /dev/null
++++ b/fse22-artifact/create_overall_results.sh
+@@ -0,0 +1,19 @@
++#!/bin/bash
++
++set -e
++
++./fse22-artifact/paper-plots.R
++
++DST=/home/pasta/results/overall
++
++cd resources/R
++mkdir build
++for i in *_standalone.tex; do
++	pdflatex -output-directory=build $i
++done
++
++mv -v build/*.pdf .
++rm -rfv build
++
++mkdir -p $DST
++cp -av * $DST
+diff --git a/fse22-artifact/daumenkino.sh b/fse22-artifact/daumenkino.sh
+new file mode 100755
+index 0000000..b348e7b
+--- /dev/null
++++ b/fse22-artifact/daumenkino.sh
+@@ -0,0 +1,30 @@
++#!/bin/bash
++
++set -e
++
++project=$1
++
++./pasta set_config $project
++./analyses/animate_test.R
++
++#daumenkino="$HOME/results/daumenkino/$project"
++#template="./fse22-artifact/tikz_template.tex"
++#build="$daumenkino/build"
++
++#mkdir -p $daumenkino $build
++
++#realpath ./resources/$project/resources/maintainers_section_graph/* | grep -v -- "-rc" | grep -v "filemap" | \
++#	xargs -n 1 -I {} -P $(nproc) bash -c "./analyses/tex_generator.R {} \$(echo {} | sed -e 's/\.csv/_filemap\.csv/')"
++#
++#for i in resources/$project/resources/R/graphdesc*.tex; do
++#	./fse22-artifact/daumenkino/daumenkino.py -i $i -o $daumenkino/$(basename $i)
++#done
++#
++#ls $daumenkino/*.tex | \
++#	xargs -n 1 -I {} -P $(nproc) \
++#	bash -c "lualatex -output-directory $build -jobname \$(basename -s .tex {}) \"\\newcommand{\\version}{\$(basename -s .tex {} | cut -b 11-)}\\newcommand{\\filename}{{}}\\input{$template}\""
++#
++#mv -v $build/*.pdf $daumenkino/
++#
++#files=$(ls $daumenkino/*.pdf | sort -V)
++#pdftk $files cat output $daumenkino/daumenkino.pdf
+diff --git a/fse22-artifact/graph_analysis.R b/fse22-artifact/graph_analysis.R
+new file mode 100755
+index 0000000..6f4a2a0
+--- /dev/null
++++ b/fse22-artifact/graph_analysis.R
+@@ -0,0 +1,684 @@
++#!/usr/bin/env Rscript
++
++# TODO: KOMPLETT UEBERARBEITEN!
++library(igraph)
++library(ineq)
++library(purrr)
++library(logging)
++library(ggplot2)
++library(grid)
++
++source("analyses/maintainers_graph_util.R")
++source("fse22-artifact/util-networks-metrics.R")
++
++projects <- c("linux", "xen", "u-boot", "qemu")
++my.theme <- theme_bw(base_size = 12) + theme(legend.position = "top")
++
++graph_name <- c()
++project_column <- c()
++#type <- c()
++#value <- c()
++section_number <- c()
++cluster_number <- c()
++
++#avg.cluster_quantity_list <- c()
++#clusterquantity_quantile_list_05 <- c()
++#clusterquantity_quantile_list_95 <- c()
++#
++#avg.degree_list <- c()
++#degree_quantile_list_05 <- c()
++#degree_quantile_list_95 <- c()
++#
++#cluster_avg.loc_list<- c()
++#loc_quantile_list_05 <- c()
++#loc_quantile_list_95 <- c()
++
++#output_name <- file.path("resources", p, "/resources/graph_metrics.csv")
++#cluster_output_name <- file.path("resources", p, "/resources/cluster_metrics.csv")
++output_name <- "resources/number_metrics.csv"
++#cluster_output_name <- "resources/cluster_metrics.csv"
++for (p in projects) {
++  #data_dir_name <- "resources/linux/resources/maintainers_section_graph"
++  #output_name <- "resources/linux/resources/graph_metrics_new.csv"
++  #cluster_output_name <- "resources/linux/resources/cluster_graph_metrics_new.csv"
++  data_dir_name <- file.path("resources", p, "resources/maintainers_section_graph")
++  
++  files <- list.files(path = data_dir_name, pattern = "*.csv", full.names = TRUE, recursive = FALSE)
++  files <- files[!grepl("-rc", files, fixed = TRUE)]
++  files <- files[!grepl("filemap", files, fixed = TRUE)]
++  
++  for (file_name in files) {
++    print(file_name)
++    
++    #TODO: hier erste Variable als echten Graphnamen abspeichern lassen
++    file_map_name <- substr(basename(file_name), 1, nchar(basename(file_name))-4)
++    file_map_name <- paste0(file_map_name, "_filemap.csv")
++    file_map_name <- sub(basename(file_name), file_map_name, file_name)
++    
++    g_data <- maintainers_section_graph(p, file_name, file_map_name)
++    g <- g_data$graph
++    #cluster_g <- g_data$meta
++    graph_name <- c(graph_name, file_name)
++    project_column <- c(project_column, p)
++    section_number <- c(section_number, length(V(g)))
++    cluster_number <- c(cluster_number, length(g_data$bounds))
++
++    # get sizes of communities
++    #comm_sizes <- as.numeric(g_data$comm_groups %>% map(length))
++    #value <- c(value, comm_sizes)
++    #type[(length(type)+1):(length(type)+length(comm_sizes))] <- "community size"
++    #graph_name[(length(graph_name)+1):(length(graph_name)+length(comm_sizes))] <- basename(file_name)
++    #project_column[(length(project_column)+1):(length(project_column)+length(comm_sizes))] <- p
++#
++    #degrees <- unname(degree(g))
++    #value <- c(value, degrees)
++    #type[(length(type)+1):(length(type)+length(degrees))] <- "degree"
++    #graph_name[(length(graph_name)+1):(length(graph_name)+length(degrees))] <- basename(file_name)
++    #project_column[(length(project_column)+1):(length(project_column)+length(degrees))] <- p
++    #
++    #sizes_loc <- V(cluster_g)$size
++    #value <- c(value, sizes_loc)
++    #type[(length(type)+1):(length(type)+length(sizes_loc))] <- "cluster loc"
++    #graph_name[(length(graph_name)+1):(length(graph_name)+length(sizes_loc))] <- basename(file_name)
++    #project_column[(length(project_column)+1):(length(project_column)+length(sizes_loc))] <- p
++    
++    
++    
++    #quantiles <- quantile(comm_sizes, c(.95))
++    #avg.cluster_quantity <- mean(comm_sizes)
++    #avg.cluster_quantity_list <- c(avg.cluster_quantity_list, avg.cluster_quantity)
++    #clusterquantity_quantile_list_95 <- c(clusterquantity_quantile_list_95, quantiles['95%'])
++  #
++    #quantiles <- quantile(unname(degree(g)), c(.95))
++    #avg.degree = metrics.avg.degree(g)
++    #avg.degree_list <- c(avg.degree_list, avg.degree)
++    #degree_quantile_list_95 <- c(degree_quantile_list_95, quantiles['95%'])
++  #
++    ### cluster data
++    #quantiles <- quantile(V(cluster_g)$size, c(.95))
++    #cluster_avg.loc <- mean(V(cluster_g)$size)
++    #cluster_avg.loc_list <- c(cluster_avg.loc_list, cluster_avg.loc)
++    #loc_quantile_list_95 <- c(loc_quantile_list_95, quantiles['95%'])
++  }
++}
++
++#df <- data.frame(graph_name, project_column, modularity_list, avg.path.length_list, density_list, 
++#                 global.clustering.coefficient_list, local.avg.clustering.coefficient_list, 
++#                 avg.degree_list, avg.cluster_quantity_list, hub.degree_list, scale.free.ness_list, gini.cluster_quantity_list, gini.degree_list)
++#
++#cluster_df <- data.frame(graph_name, project_column, cluster_modularity_list, cluster_avg.path.length_list, cluster_density_list,
++#                 cluster_global.clustering.coefficient_list, cluster_local.avg.clustering.coefficient_list, cluster_avg.loc_list,
++#                 cluster_avg.degree_list, cluster_hub.degree_list, cluster_scale.free.ness_list, cluster_gini.loc_list, cluster_gini.degree_list)
++
++#df <- data.frame(graph_name, project_column, avg.degree_list,
++#                 degree_quantile_list_95,
++#                 avg.cluster_quantity_list, clusterquantity_quantile_list_95)
++#
++#cluster_df <- data.frame(graph_name, project_column, cluster_avg.loc_list, loc_quantile_list_95)
++#df <- data.frame(graph_name, project_column, type, value)
++df <- data.frame(graph_name, project_column, section_number, cluster_number)
++write.csv(df, output_name)
++
++quit()
++
++# error plots !!!
++df <- read.csv("resources/number_metrics.csv")
++df <- ddply(df, .(project_column, graph_name, type), summarize, mean = mean(value), sd = round(sd(value), 2))
++
++# todo: yadda yadda graph_name cutting, data merging by date yadda yadda
++tmp_df <- df %>% filter(type == "community size")
++ggplot(tmp_df, aes(x=date, y=mean, group=project_column, color=project_column)) + 
++  geom_line() +
++  geom_point()+
++  geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.2,
++                position=position_dodge(0.05)) +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank()) +
++  facet_wrap(~project_column, scales = "free")
++
++ggplot(tmp_df, aes(x=graph_name, y=value, fill=project_column)) + 
++  geom_boxplot()
++
++
++#cluster_df <- data.frame(graph_name, project_column, cluster_avg.loc_list, loc_quantile_list_95)
++
++
++#largest_t <- c(largest, V(g)[which(V(g)$size == tail(sort(V(g)$size),3)[3])]$name)
++#second_largest_t <- c(second_largest, V(g)[which(V(g)$size == tail(sort(V(g)$size),3)[2])]$name)
++#third_largest_t <- c(third_largest, V(g)[which(V(g)$size == tail(sort(V(g)$size),3)[1])]$name)
++# TODO: merge this into paper-plots.R
++
++
++f_releases <- 'resources/releases.csv'
++load_releases <- function(filename) {
++  data <- read_csv(filename)
++  data <- data %>% mutate(date = as.Date(date))
++}
++if (!exists('releases')) {
++  releases <- load_releases(f_releases)
++}
++
++df <- read.csv(output_name)
++cluster_df <- read.csv(cluster_output_name)
++df <- df[match(stringr::str_sort(df[["graph_name"]], numeric = TRUE), df[["graph_name"]]),]
++cluster_df <- cluster_df[match(stringr::str_sort(cluster_df[["graph_name"]], numeric = TRUE), cluster_df[["graph_name"]]),]
++df$graph_name = substr(df$graph_name, 1, nchar(df$graph_name)-4)
++cluster_df$graph_name = substr(cluster_df$graph_name, 1, nchar(cluster_df$graph_name)-4)
++df <- df %>% merge(releases, by.x = c("graph_name", "project_column"), by.y = c("release", "project"))
++cluster_df <- cluster_df %>% merge(releases, by.x = c("graph_name", "project_column"), by.y = c("release", "project"))
++#write.csv(df, output_name)
++#write.csv(cluster_df, cluster_output_name)
++
++# order data frames according to graph_name
++#df$graph_name <- factor(df$graph_name, levels = df$graph_name)
++#cluster_df$graph_name <- factor(cluster_df$graph_name, levels = cluster_df$graph_name)
++
++# TODO: gleiche y-Achse
++tmp_df <- df %>%
++  select(avg.cluster_quantity_list, clusterquantity_quantile_list_95, date, project_column) %>%
++  melt(id.vars = c('date', 'project_column'))
++levels(tmp_df$variable)[levels(tmp_df$variable)=="avg.cluster_quantity_list"] <- "Average Cluster Quantity"
++levels(tmp_df$variable)[levels(tmp_df$variable)=="clusterquantity_quantile_list_95"] <- "95% Quantile of Cluster Quantity"
++pdf("sectiongraph_avgClusterQuantity.pdf", width = 15, height = 10)
++#ggplot(df, aes(x=graph_name, avg.cluster_quantity_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Average Cluster Quantity for Section Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++ggplot(tmp_df, aes(x = date, y = value, color = variable, group=variable)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Number of sections per Cluster') +
++  xlab('Version') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank()) +
++  facet_wrap(~project_column, scales = "free_x")
++dev.off()
++
++tmp_df <- df %>%
++  select(avg.degree_list, degree_quantile_list_95, date, project_column) %>%
++  melt(id.vars = c('date', 'project_column'))
++levels(tmp_df$variable)[levels(tmp_df$variable)=="avg.degree_list"] <- "Average Degree"
++levels(tmp_df$variable)[levels(tmp_df$variable)=="degree_quantile_list_95"] <- "95% Quantile of Degree"
++
++pdf("sectiongraph_avgDegree.pdf", width = 15, height = 10)
++ggplot(tmp_df, aes(x = date, y = value, color = variable, group=variable)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Degree in Section Graph') +
++  xlab('Version') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank()) +
++  facet_wrap(~project_column, scales = "free_x")
++#ggplot(df, aes(graph_name, avg.degree_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Average Degree for Section Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++dev.off()
++
++tmp_df <- cluster_df %>%
++  select(cluster_avg.loc_list, loc_quantile_list_95, date, project_column) %>%
++  melt(id.vars = c('date', 'project_column'))
++levels(tmp_df$variable)[levels(tmp_df$variable)=="cluster_avg.loc_list"] <- "Average LoC of a Cluster"
++levels(tmp_df$variable)[levels(tmp_df$variable)=="loc_quantile_list_95"] <- "95% Quantile LoC in a Cluster"
++
++pdf("clustergraph_avgLoC.pdf", width = 15, height = 10)
++ggplot(tmp_df, aes(x = date, y = value, color = variable, group=variable)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('LoC in Cluster') +
++  xlab('Version') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank()) +
++  facet_wrap(~project_column, scales = "free_x")
++#ggplot(cluster_df, aes(graph_name, cluster_avg.loc_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Cluster Average Lines of Code for Cluster Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++dev.off()
++
++tmp_df <- cluster_df %>%
++  select(cluster_avg.loc_list, date, project_column)
++ggplot(tmp_df, aes(x = date, y = cluster_avg.loc_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('LoC in Cluster') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++
++tmp_df <- df %>%
++  select(avg.cluster_quantity_list, date, project_column)
++ggplot(tmp_df, aes(x = date, y = avg.cluster_quantity_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Cluster Quantity') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++
++tmp_df <- df %>%
++  select(avg.degree_list, date, project_column)
++ggplot(tmp_df, aes(x = date, y = avg.degree_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Average Degree') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++
++#levels(tmp_df$project_column)[levels(tmp_df$project_column)=="xen"] <- "Average LoC of a Cluster"
++#levels(tmp_df$project_column)[levels(tmp_df$project_column)=="xen"] <- "Average LoC of a Cluster"
++#levels(tmp_df$project_column)[levels(tmp_df$project_column)=="xen"] <- "Average LoC of a Cluster"
++#levels(tmp_df$project_column)[levels(tmp_df$project_column)=="Linu"] <- "95% Quantile LoC in a Cluster"
++### OLD COMPLEXITY STUFF
++
++df <- read.csv("resources/old_graph_metrics.csv")
++cluster_df <- read.csv("resources/old_cluster_metrics.csv")
++
++df <- df %>% select(graph_name, project_column, modularity_list, density_list, hub.degree_list)
++cluster_df <- cluster_df %>% select(graph_name, project_column, cluster_modularity_list, cluster_density_list, cluster_hub.degree_list)
++df$graph_name = substr(df$graph_name, 1, nchar(df$graph_name)-4)
++cluster_df$graph_name = substr(cluster_df$graph_name, 1, nchar(cluster_df$graph_name)-4)
++df <- df %>% merge(releases, by.x = c("graph_name", "project_column"), by.y = c("release", "project"))
++cluster_df <- cluster_df %>% merge(releases, by.x = c("graph_name", "project_column"), by.y = c("release", "project"))
++
++# Modularity
++
++ggplot(df, aes(x = date, y = modularity_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Modularity Section Graph') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++
++ggplot(cluster_df, aes(x = date, y = cluster_modularity_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Modularity Cluster Graph') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++
++# Hub Degree
++
++ggplot(df, aes(x = date, y = hub.degree_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Hub Degree Section Graph') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++
++ggplot(cluster_df, aes(x = date, y = cluster_hub.degree_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Hub Degree Cluster Graph') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++# Density
++
++ggplot(df, aes(x = date, y = density_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Density Section Graph') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++
++ggplot(cluster_df, aes(x = date, y = cluster_density_list, color = project_column, group=project_column)) +
++  geom_line() +
++  stat_smooth() +
++  ylab('Density Cluster Graph') +
++  xlab('Date') +
++  my.theme +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++        axis.title.x = element_blank(), legend.title = element_blank())
++#pdf("density.pdf", width = 15, height = 10)
++#p1 <- ggplot(df, aes(graph_name, density_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Density") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#p2 <- ggplot(cluster_df, aes(graph_name, cluster_density_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++#
++#grid.newpage()
++#grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
++#dev.off()
++
++
++#pdf("sectiongraph_giniDegree.pdf", width = 15, height = 10)
++##p1 <- ggplot(df, aes(graph_name, gini.degree_list)) + geom_point() +
++##  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++##        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++##  ggtitle("Gini Degree") +
++##  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++##p2 <- ggplot(cluster_df, aes(graph_name, cluster_gini.degree_list)) + geom_point() +
++##  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++##        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++##  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++##grid.newpage()
++#ggplot(df, aes(graph_name, gini.degree_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Gini Degree for Section Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#dev.off()
++#
++#pdf("sectiongraph_giniClusterQuantity.pdf", width = 15, height = 10)
++#ggplot(df, aes(graph_name, gini.cluster_quantity_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Gini Cluster Quantity for Section Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#dev.off()
++#
++#pdf("sectiongraph_avgClusterQuantity.pdf", width = 15, height = 10)
++#ggplot(df, aes(graph_name, avg.cluster_quantity_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Average Cluster Quantity for Section Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#dev.off()
++#
++#pdf("sectiongraph_avgDegree.pdf", width = 15, height = 10)
++#ggplot(df, aes(graph_name, avg.degree_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Average Degree for Section Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#dev.off()
++#
++#pdf("clustergraph_avgLoC.pdf", width = 15, height = 10)
++#ggplot(cluster_df, aes(graph_name, cluster_avg.loc_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Cluster Average Lines of Code for Cluster Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#dev.off()
++#
++#pdf("clustergraph_giniDegree.pdf", width = 15, height = 10)
++#ggplot(cluster_df, aes(graph_name, cluster_gini.degree_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Gini Degree for Cluster Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#dev.off()
++#
++#pdf("clustergraph_giniLoC.pdf", width = 15, height = 10)
++#ggplot(cluster_df, aes(graph_name, cluster_gini.loc_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Cluster Gini Lines of Code for Cluster Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#dev.off()
++#
++#pdf("clustergraph_avgDegree.pdf", width = 15, height = 10)
++#ggplot(cluster_df, aes(graph_name, cluster_avg.degree_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free") +
++#  ggtitle("Average Degree for Cluster Graph")
++#dev.off()
++#
++#ggplot(df, aes(graph_name, avg.cluster_quantity_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Average Cluster Quantity for Section Graph") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++
++#pdf("avgPathLength.pdf", width = 15, height = 10)
++#p1 <- ggplot(df, aes(graph_name, avg.path.length_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Modularity") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#p2 <- ggplot(cluster_df, aes(graph_name, cluster_modularity_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++#
++#grid.newpage()
++#grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
++#dev.off()
++
++#pdf("density.pdf", width = 15, height = 10)
++#p1 <- ggplot(df, aes(graph_name, density_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Density") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#p2 <- ggplot(cluster_df, aes(graph_name, cluster_density_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++#
++#grid.newpage()
++#grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
++#dev.off()
++
++#pdf("globalClusteringCoefficient.pdf", width = 15, height = 10)
++#p1 <- ggplot(df, aes(graph_name, global.clustering.coefficient_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Global Clustering Coefficient") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#p2 <- ggplot(cluster_df, aes(graph_name, cluster_global.clustering.coefficient_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++#
++#grid.newpage()
++#grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
++#dev.off()
++#
++#pdf("localAvgClusteringCoefficient.pdf", width = 15, height = 10)
++#p1 <- ggplot(df, aes(graph_name, local.avg.clustering.coefficient_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Local Clustering Coefficient") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#p2 <- ggplot(cluster_df, aes(graph_name, cluster_local.avg.clustering.coefficient_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++#
++#grid.newpage()
++#grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
++#dev.off()
++
++#pdf("modularity.pdf", width = 15, height = 10)
++#p1 <- ggplot(df, aes(graph_name, modularity_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Modularity") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#p2 <- ggplot(cluster_df, aes(graph_name, cluster_modularity_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++#grid.newpage()
++#grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
++#dev.off()
++
++#pdf("hubDegree.pdf", width = 15, height = 10)
++#p1 <- ggplot(df, aes(graph_name, hub.degree_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Hub Degree") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#p2 <- ggplot(cluster_df, aes(graph_name, cluster_hub.degree_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++#
++#grid.newpage()
++#grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
++#dev.off()
++#
++#pdf("scalefreeness.pdf", width = 15, height = 10)
++#p1 <- ggplot(df, aes(graph_name, scale.free.ness_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  ggtitle("Scale Freeness") +
++#  geom_line(group=1) + stat_smooth() + facet_wrap(~project_column, scales = "free")
++#p2 <- ggplot(cluster_df, aes(graph_name, cluster_scale.free.ness_list)) + geom_point() +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), axis.title.y = element_blank()) +
++#  geom_line(group=1) + facet_wrap(~project_column, scales = "free")
++#
++#grid.newpage()
++#grid.draw(rbind(ggplotGrob(p1), ggplotGrob(p2), size = "last"))
++#dev.off()
++
++##df <- df[match(stringr::str_sort(df[["graph_name"]], numeric = TRUE), df[["graph_name"]]),]
++#cluster_dir_name <- "resources/linux/resources/maintainers_cluster"
++#cluster_files <- list.files(path = cluster_dir_name, pattern = "*.csv", full.names = TRUE, recursive = FALSE)
++#cluster_files <- cluster_files[!grepl("-rc", cluster_files, fixed = TRUE)]
++#cluster_files <- stringr::str_sort(cluster_files, numeric = TRUE)
++#
++#rep_list <- list()
++#
++#previous_df <- read.csv(cluster_files[1])
++#rep_list[[basename(cluster_files[1])]] <- unique(previous_df$c_representative)
++#
++#for (i in 2:length(cluster_files)) {
++#  file_name <- cluster_files[i]
++#  previous_file_name <- cluster_files[i-1]
++#  df <- read.csv(file_name)
++#  # get current cluster representatives
++#  cluster_reps <- unique(df$c_representative)
++#  # get the previous cluster representatives from the previous version from
++#  # the already stored rep_list by accessing them through the previous file_name
++#  predecessors <- rep_list[[basename(previous_file_name)]]
++#
++#  new_reps <- c()
++#  # for all predecessors, find the one next cluster_rep, that overlaps the most
++#  for (c_p_index in 1:length(predecessors)) {
++#    c_p <- predecessors[c_p_index]
++#    #print("BEFORE")
++#    #print(c_p_index)
++#    # if a cluster_rep was deleted (which can happen if all next clusters had
++#    # 0 overlap), we simply skip this entry. It will stay empty now
++#    if (is.null(c_p)) {
++#      next
++#    }
++#    max_c <- NA
++#    max_overlap <- 0
++#    # we iterate over all new cluster_reps to get the one with the highest
++#    # overlap
++#    for (c in cluster_reps) {
++#      #print("MIDDLE")
++#      #print(c)
++#      overlap <- compare_cluster_csv(previous_df, df, c_p, c)
++#      if (overlap > max_overlap) {
++#        max_c <- c
++#        max_overlap <- overlap
++#      }
++#    }
++#    # we store the one with the highest overlap where the original predecessor
++#    # was
++#    # TODO Delme
++#    #print("AFTER")
++#    print(c_p_index)
++#    new_reps[c_p_index] <- max_c
++#
++#    # with this approach, there could still be new clusters missing now, since
++#    # we iterated over the predecessors. We need to now detect and keep track
++#    # of all new clusters by letting them trail the new representatives
++#    missed_reps <- setdiff(cluster_reps, new_reps)
++#    new_reps <- c(new_reps, missed_reps)
++#  }
++#  rep_list[[basename(file_name)]] <- new_reps
++#  previous_df <- df
++#}
++#
++#max_cluster_length <- max(unlist(lapply(rep_list, length)))
++## add padding NA's at the end of each vector
++#rep_list <- lapply(rep_list, function(x) x <- c(x, rep(NA, max_cluster_length-length(x))))
++#final_df <- as.data.frame(rep_list, col.names = basename(cluster_files))
++#write.table(final_df, "rep_list.csv", row.names = FALSE, sep = ",")
+diff --git a/fse22-artifact/meiomei.py b/fse22-artifact/meiomei.py
+new file mode 100755
+index 0000000..edfcf06
+--- /dev/null
++++ b/fse22-artifact/meiomei.py
+@@ -0,0 +1,22 @@
++#!/usr/bin/env python3
++
++import csv
++import sys
++from collections import defaultdict
++
++filename = sys.argv[1]
++
++clusters=defaultdict(set)
++
++with open(filename, 'r') as f:
++    c = csv.DictReader(f)
++    for row in c:
++        clusters[row['c_representative']].add(row['c_section'])
++
++out = str()
++for vals in clusters.values():
++    vals = [v.replace(' ', '') for v in vals]
++    out += ' '.join(vals) + '\n'
++
++out = out.strip()
++print(out)
+diff --git a/fse22-artifact/meiomei.sh b/fse22-artifact/meiomei.sh
+new file mode 100755
+index 0000000..d9355bd
+--- /dev/null
++++ b/fse22-artifact/meiomei.sh
+@@ -0,0 +1,62 @@
++#!/bin/bash
++
++project=$(cat config)
++res="resources/$project/resources"
++bla="maintainers_cluster maintainers_cluster_fast_greedy maintainers_cluster_infomap maintainers_cluster_louvain"
++
++# Anpassen gehen
++#files=$(ls $res/$...etc etc)
++for i in $bla; do
++	target="$res/clusterings_$i"
++	mkdir $target
++	for csv in $res/$i/*.csv; do
++		echo "working on $csv..."
++		fse22-artifact/meiomei.py $csv > $target/$(basename -s .csv $csv).clustering
++	done
++done
++
++for i in $bla; do
++	files=$(ls $res/clusterings_$i)
++	for f in $files; do
++		echo $f
++	done
++done
++
++for cluster_dir in $bla; do
++	# angelegt und entleert
++	echo -en > "$res/output_$cluster_dir.txt"
++done
++
++wt_files=$(ls $res/clusterings_maintainers_cluster)
++for wt_file in $wt_files; do
++	for cluster_dir in $bla; do
++		target="$res/output_$cluster_dir.txt"
++		## angelegt und entleert
++		#echo -en > $target
++		clustering_walktrap="$res/clusterings_maintainers_cluster/$wt_file"
++		clustering_compare="$res/clusterings_$cluster_dir/$(basename $wt_file)"
++		echo "Working on cluster compare file $clustering_compare"
++		echo $(basename $clustering_compare) >> $target
++
++		if ! [ -f $clustering_compare ]; then
++			echo "file not existing, skipping"
++			continue
++		fi
++		#./pasta compare_clusters -fm -pur -f $target $clustering_walktrap $clustering_compare
++		./pasta compare_clusters -fm -pur $clustering_walktrap $clustering_compare >> $target
++	done
++done
++
++for cluster_dir in $bla; do
++	echo "Working on dir $cluster_dir"
++	# Median und Mean printen
++	echo "Fowlkes-Mallows: Mean/Median"
++	cat "$res/output_$cluster_dir.txt" | grep Fowlkes-Mallows | cut -d : -f4 | cut -c 2- | awk '{sum += $1 n++} END { print sum/n; }'
++	cat "$res/output_$cluster_dir.txt" | grep Fowlkes-Mallows | cut -d : -f4 | cut -c 2- | sort -n | awk ' { a[i++]=$1; } END { print a[int(i/2)]; }'
++	echo "Purity: Mean/Median"
++	cat "$res/output_$cluster_dir.txt" | grep Purity | cut -d : -f4 | cut -c 2- | awk '{sum += $1 n++} END { print sum/n; }'
++	cat "$res/output_$cluster_dir.txt" | grep Purity | cut -d : -f4 | cut -c 2- | sort -n | awk ' { a[i++]=$1; } END { print a[int(i/2)]; }'
++	echo "V-Measure: Mean/Median"
++	cat "$res/output_$cluster_dir.txt" | grep V-measure | cut -d : -f4 | cut -c 2- | awk '{sum += $1 n++} END { print sum/n; }'
++	cat "$res/output_$cluster_dir.txt" | grep V-measure | cut -d : -f4 | cut -c 2- | sort -n | awk ' { a[i++]=$1; } END { print a[int(i/2)]; }'
++done
+diff --git a/fse22-artifact/paper-plots.R b/fse22-artifact/paper-plots.R
+new file mode 100755
+index 0000000..0a2c116
+--- /dev/null
++++ b/fse22-artifact/paper-plots.R
+@@ -0,0 +1,366 @@
++#!/usr/bin/env Rscript
++
++library(dplyr, warn.conflicts = FALSE)
++library(ggplot2)
++library(lubridate, warn.conflicts = FALSE)
++library(reshape2)
++library(tikzDevice)
++
++f_characteristics <- 'resources/characteristics.csv'
++f_characteristics_rand <- 'resources/characteristics_rand.csv'
++f_releases <- 'resources/releases.csv'
++
++d_dst = 'resources/R'
++
++dir.create(d_dst)
++
++date.min <- '2011-01-01'
++date.max <- '2030-12-31'
++
++WIDTH <- 7
++HEIGHT <- 3.3
++
++my.theme <- theme_bw(base_size = 12) + theme(legend.position = "top")
++
++printplot <- function(p, filename, ...) {
++  plot(p, ...)
++  
++  filename <- file.path(d_dst, filename)
++  #png(paste0(filename, '.png'), width=1920, height=1080/2)
++  tikz(paste0(filename, '.tex'), width = WIDTH, height = HEIGHT, sanitize = TRUE, standAlone = FALSE)
++  plot(p, ...)
++  dev.off()
++
++  tikz(paste0(filename, '_standalone.tex'), width = WIDTH, height = HEIGHT, sanitize = TRUE, standAlone = TRUE)
++  plot(p, ...)
++  dev.off()
++}
++
++read_csv <- function(filename) {
++  return(read.csv(filename, header = TRUE, sep = ','))
++}
++
++load_characteristics <- function(filename) {
++  data <- read_csv(filename)
++  data$list.matches_patch <- as.logical(data$list.matches_patch)
++  data$ignored <- as.logical(data$ignored)
++  data$committer.correct <- as.logical(data$committer.correct)
++  data$committer.xcorrect <- as.logical(data$committer.xcorrect)
++  data <- data %>% mutate(date = as.Date(time))
++
++  # Add week info
++  data <- data %>% mutate(week = as.Date(cut(date, breaks = "week")))
++
++  return(data)
++}
++
++load_releases <- function(filename) {
++  data <- read_csv(filename)
++  data <- data %>% mutate(date = as.Date(date))
++}
++
++fillup_missing_weeks <- function(data, key) {
++  min.week <- min(data$week)
++  delta.weeks <- days(max(data$week) - min.week)$day / 7
++
++  all.weeks <- as.Date(sapply(0:delta.weeks, function(n) {
++    return (as.character(min.week + weeks(n)))
++  }))
++
++  missing.weeks <- !(all.weeks %in% data$week)
++  if (any(missing.weeks)) {
++    frame <- data.frame(week = all.weeks[missing.weeks], col = 0)
++    colnames(frame) <- colnames(data)
++
++    return(rbind(data, frame))
++  }
++  return (data)
++}
++
++composition <- function(data, plot_name) {
++  #relevant <- data %>% select(week, type, list)
++  relevant <- data %>% select(project, week, type)
++  
++  other <- 'Other'
++  relevant$type[relevant$type == 'process'] <- other
++  relevant$type[relevant$type == 'linux-next'] <- other
++  relevant$type[relevant$type == 'stable-review'] <- other
++  relevant$type[relevant$type == 'bot'] <- other
++  relevant$type[relevant$type == 'not-first'] <- other
++  
++  relevant$type[relevant$type == 'patch'] <- 'Regular Patch'
++  relevant$type[relevant$type == 'not-linux'] <- 'Not Project'
++
++  total <- relevant %>%
++    group_by(project, week, type) %>%
++    count(project, name = 'num')
++  sum <- total %>%
++    group_by(project, week) %>%
++    summarise(num = sum(num)) %>%
++    mutate(type = 'sum', .before = 'project')
++  total <- bind_rows(total, sum)
++
++  plot <- ggplot(total,
++                 aes(x = week, y = num, color = type)) +
++    geom_line() +
++    geom_smooth() +
++    #geom_vline(xintercept = releases$date, linetype="dotted") +
++    #scale_y_sqrt(breaks = c(10, 100, 250, 500, 1000, 2000, 3000, 4000, 5000)) +
++    ylab('Number of patches per week') +
++    xlab('Date') +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = "funky funky",
++                 #                     breaks = releases$date,
++                 #                     labels = releases$release)
++    ) +
++    labs(color = '') +
++    facet_wrap(~project, scales = 'free_y') +
++    my.theme +
++    theme(axis.text.x.top = element_text(angle = 45, hjust = 0))
++  printplot(plot, plot_name)
++}
++
++# Only call for overall analysis!
++patch_conform_by_week <- function(data, plot_name, field) {
++  relevant <- data %>% select(project, week, !!field)
++
++  true <- relevant %>% filter(!!field == TRUE) %>% select(-!!field) %>% group_by(project, week) %>% count(name = 'correct')
++  false <- relevant %>% filter(!!field == FALSE) %>% select(-!!field) %>% group_by(project, week) %>% count(name = 'incorrect')
++  not_integrated <- relevant %>% filter(is.na(!!field)) %>% select(-!!field) %>% group_by(project, week) %>% count(name = 'not_integrated')
++  total <- relevant %>% select(project, week) %>% group_by(project, week) %>% count(name = 'total')
++
++  # Fill up weeks with no values with zeroes
++  total <- total %>% group_by(project) %>% group_modify(fillup_missing_weeks)
++
++  # We must also merge weeks with no ignored patches, so all.x/y = TRUE
++  df <- merge(x = true, y = false, by = c('project', 'week'), all.x = TRUE, all.y = TRUE)
++  df <- merge(x = df, y = not_integrated, by = c('project', 'week'), all.x = TRUE, all.y = TRUE)
++  df <- merge(x = df, y = total, by = c('project', 'week'), all.x = TRUE, all.y = TRUE)
++  # Then, replace NA by 0
++  df[is.na(df)] <- 0
++
++  df <- melt(df, id.vars = c('project', 'week'))
++
++  p <- ggplot(df, aes(x = week, y = value, color = variable)) +
++    geom_line() +
++    geom_smooth() +
++    #geom_vline(xintercept = releases$date, linetype="dotted") +
++    ylab('Number of patches per week') +
++    xlab('Date') +
++    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                #                     breaks = releases$date,
++                #                     labels = releases$release)
++    ) +
++    facet_wrap(~project, scales = 'free') +
++    ggtitle(plot_name) +
++    my.theme +
++    theme(axis.text.x.top = element_text(angle = 90, hjust = 0),
++          legend.title = element_blank())
++  printplot(p, plot_name)
++}
++
++# Only call for overall analysis!
++patch_conform_ratio <- function(data, plot_name) {
++  relevant <- data %>% select(project, week, committer.correct, committer.xcorrect)
++
++  true <- relevant %>% filter(committer.correct == TRUE) %>% select(project, week) %>% group_by(project, week) %>% count(name = 'correct')
++  false <- relevant %>% filter(committer.correct == FALSE) %>% select(project, week) %>% group_by(project, week) %>% count(name = 'incorrect')
++
++  xtrue <- relevant %>% filter(committer.xcorrect == TRUE) %>% select(project, week) %>% group_by(project, week) %>% count(name = 'xcorrect')
++  xfalse <- relevant %>% filter(committer.xcorrect == FALSE) %>% select(project, week) %>% group_by(project, week) %>% count(name = 'xincorrect')
++
++
++  # Fill up weeks with no values with zeroes
++  true <- true %>% group_by(project) %>% group_modify(fillup_missing_weeks)
++
++  # We must also merge weeks with no ignored patches, so all.x/y = TRUE
++  df <- merge(x = true, y = false, by = c('project', 'week'), all.x = TRUE, all.y = TRUE)
++  df <- merge(x = df, y = xtrue, by = c('project', 'week'), all.x = TRUE, all.y = TRUE)
++  df <- merge(x = df, y = xfalse, by = c('project', 'week'), all.x = TRUE, all.y = TRUE)
++  # Then, replace NA by 0
++  df[is.na(df)] <- 0
++
++  df <- df %>%
++    mutate(ratio_correct = correct / (correct + incorrect)) %>%
++    mutate(ratio_xcorrect = xcorrect / (xcorrect + xincorrect)) %>%
++    select(project, week, ratio_correct, ratio_xcorrect)
++
++  df <- melt(df, id.vars = c('project', 'week'))
++  # rename the levels for proper legend naming
++  levels(df$variable)[levels(df$variable)=="ratio_correct"] <- "section conform"
++  levels(df$variable)[levels(df$variable)=="ratio_xcorrect"] <- "cluster conform"
++
++  project_names <- c(
++    'linux'="Linux",
++    'u-boot'="U-Boot",
++    'qemu'="QEMU",
++    'xen'="Xen-Project"
++  )
++
++  # adding line for randomised values
++  #random <- df %>% filter((grepl("random", project)) & (variable == "cluster conform"))
++  #random$variable <- "random conform"
++  #random$variable <- "random conform"
++  #df <- df %>% filter(!grepl("random", project))
++  #df <- rbind(df, random)
++  #df$project <- stringr::str_remove(df$project, "random_")
++
++  p <- ggplot(df, aes(x = week, y = value, color = variable)) +
++    geom_line() +
++    geom_smooth() +
++    #geom_vline(xintercept = releases$date, linetype="dotted") +
++    #ylab('Ratio of conformingly integrated patches') +
++    #xlab('Date') +
++    scale_x_date(date_breaks = '2 year', date_labels = '%Y',
++                 #sec.axis = dup_axis(name = prj_releases,
++                 #                    breaks = releases$date,
++                 #                    labels = releases$release)
++    ) +
++    facet_wrap(~project, scales = 'fixed', labeller = as_labeller(project_names)) +
++    #ggtitle("Ratio for all projects") +
++    my.theme +
++    scale_y_continuous(labels = scales::percent) +
++    theme(axis.text.x.top = element_text(angle = 90, hjust = 0),
++          legend.title = element_blank(), axis.title.x = element_blank(),
++          axis.title.y = element_blank(),
++          legend.margin=margin(0,0,0,0),
++          legend.box.margin=margin(0,0,-10,0))
++
++  printplot(p, plot_name)
++}
++
++patch_conform_ratio_list <- function(data, plot_name) {
++  relevant <- data %>% select(week, committer.correct, committer.xcorrect, list)
++
++  true <- relevant %>% filter(committer.correct == TRUE) %>% select(week, list) %>% group_by(week, list) %>% count(name = 'correct')
++  false <- relevant %>% filter(committer.correct == FALSE) %>% select(week, list) %>% group_by(week, list) %>% count(name = 'incorrect')
++
++  xtrue <- relevant %>% filter(committer.xcorrect == TRUE) %>% select(week, list) %>% group_by(week, list) %>% count(name = 'xcorrect')
++  xfalse <- relevant %>% filter(committer.xcorrect == FALSE) %>% select(week, list) %>% group_by(week, list) %>% count(name = 'xincorrect')
++
++
++  # Fill up weeks with no values with zeroes
++  true <- true %>% group_by(list) %>% group_modify(fillup_missing_weeks)
++
++  # We must also merge weeks with no ignored patches, so all.x/y = TRUE
++  df <- merge(x = true, y = false, by = c('week', 'list'), all.x = TRUE, all.y = TRUE)
++  df <- merge(x = df, y = xtrue, by = c('week', 'list'), all.x = TRUE, all.y = TRUE)
++  df <- merge(x = df, y = xfalse, by = c('week', 'list'), all.x = TRUE, all.y = TRUE)
++  # Then, replace NA by 0
++  df[is.na(df)] <- 0
++  
++  rel <- releases %>% filter(project == 'linux') %>% select(-project)
++  rel <- rel %>% filter(grepl("v[3-5]\\.(0|5|10|15)", release))
++
++  df <- df %>%
++    mutate(ratio_correct = correct / (correct + incorrect)) %>%
++    mutate(ratio_xcorrect = xcorrect / (xcorrect + xincorrect)) %>%
++    select(week, list, ratio_correct, ratio_xcorrect)
++
++  df <- melt(df, id.vars = c('week', 'list'))
++  # rename the levels for proper legend naming
++  levels(df$variable)[levels(df$variable)=="ratio_correct"] <- "section conform"
++  levels(df$variable)[levels(df$variable)=="ratio_xcorrect"] <- "cluster conform"
++
++  p <- ggplot(df, aes(x = week, y = value, color = variable)) +
++    geom_line() +
++    geom_smooth() +
++    #geom_vline(xintercept = releases$date, linetype="dotted") +
++    #ylab('Ratio of conformingly integrated patches') +
++    #xlab('Date') +
++    scale_x_date(date_breaks = '2 year', date_labels = '%Y',
++                 sec.axis = dup_axis(name = 'Linux',
++                                     breaks = rel$date,
++                                     labels = rel$release)
++    ) +
++    facet_wrap(~list, scales = 'fixed') +
++    my.theme +
++    scale_y_continuous(labels = scales::percent) +
++    theme(axis.text.x.top = element_text(angle = 45, hjust = 0),
++          legend.title = element_blank(), axis.title.x = element_blank(),
++          axis.title.y = element_blank(),
++          legend.margin=margin(0,0,0,0),
++          legend.box.margin=margin(0,0,-12,0))
++
++  prev_height <- HEIGHT
++  HEIGHT <- 4
++  prev_width <- WIDTH
++  WIDTH <- 9
++
++  printplot(p, plot_name)
++  HEIGHT <- prev_height
++  WIDTH <- prev_width
++}
++
++
++
++if (!exists('raw_data')) {
++  raw_data <- load_characteristics(f_characteristics)
++  #raw_data <- rbind(raw_data, load_characteristics(f_characteristics_rand))
++}
++
++if (!exists('releases')) {
++  releases <- load_releases(f_releases)
++}
++
++# Filter strong outliers, select the appropriate time window
++# and only patches with type 'patch'
++filtered_data <- raw_data %>%
++  filter(from != 'baolex.ni@intel.com') %>%
++  filter(week < date.max) %>%
++  filter(week > date.min)
++
++filtered_data <- rbind(
++  filtered_data %>% filter(project != 'linux'),
++  filtered_data %>% filter(project == 'linux') %>% filter(date > '2011-05-01')
++)
++
++# Plot the composition for the whole project
++all <- filtered_data %>% select(-c(list.matches_patch))
++all$list <- 'Overall'
++all <- all %>% distinct()
++composition(all, 'composition.overall')
++
++# Once the composition is plotted, we can limit on the type 'patch'. For the
++# ignored patches analysis, we're only interested in patches that patch the project,
++# and were written by real humans.
++filtered_data_all <- all %>%
++  filter(type == 'patch') %>%
++  select(-type)
++
++patch_conform_by_week(all, 'conform', quo(committer.correct))
++patch_conform_by_week(all, 'xconform', quo(committer.xcorrect))
++
++patch_conform_ratio(filtered_data_all, 'conform_ratio.all')
++
++linux <- filtered_data %>%
++  filter(project == 'linux') %>%
++  select(-project) %>%
++  filter(list %in% c('linux-kernel@vger.kernel.org',
++                     'linux-arm-kernel@lists.infradead.org',
++                     'netdev@vger.kernel.org',
++                     'netfilter-devel@vger.kernel.org'
++                     ))
++
++patch_conform_ratio_list(linux, 'conform.linux')
++
++### Table Analyses per Project ###
++
++filtered_data$year <- format(filtered_data$date, format = "%Y")
++
++#agg_max <- setNames(aggregate(filtered_data$year, by = list(filtered_data$project), max), c("project", "MaxYear"))
++#agg_min <- setNames(aggregate(filtered_data$year, by = list(filtered_data$project), min), c("project", "MinYear"))
++
++patch_data <- filtered_data %>% select(project, id, date, year, committer, week) %>% filter(year != "2021")
++patch_data$count <- 1
++patch_traffic <- patch_data %>% group_by(project, year, week) %>% summarise(patch_traffic = sum(count)) %>%
++  as.data.frame %>% group_by(project, year) %>% summarise(mean_patch_traffic_per_week = round(mean(patch_traffic))) %>% as.data.frame
++patch_traffic
++
++commit_traffic <- patch_data %>% filter(!is.na(committer) & (committer != "")) %>% group_by(project, year, week) %>%
++  summarise(commit_traffic = sum(count)) %>% group_by(project, year) %>%
++  summarise(mean_commits_per_week = round(mean(commit_traffic))) %>% as.data.frame
++commit_traffic
++
++merge(commit_traffic, patch_traffic, by=c("project", "year"))
+diff --git a/fse22-artifact/pathLengthAnalysis.R b/fse22-artifact/pathLengthAnalysis.R
+new file mode 100644
+index 0000000..b1d0c5d
+--- /dev/null
++++ b/fse22-artifact/pathLengthAnalysis.R
+@@ -0,0 +1,84 @@
++
++library(igraph)
++library(ineq)
++library(purrr)
++library(logging)
++library(ggplot2)
++library(grid)
++
++source("analyses/maintainers_graph_util.R")
++source("fse22-artifact/util-networks-metrics.R")
++
++projects <- c("linux", "xen", "u-boot", "qemu")
++my.theme <- theme_bw(base_size = 12) + theme(legend.position = "top")
++
++graph_name <- c()
++project_column <- c()
++avg.path.length_list <- c()
++cluster_index_list <- c()
++
++for (p in projects) {
++  #data_dir_name <- "resources/linux/resources/maintainers_section_graph"
++  #output_name <- "resources/linux/resources/graph_metrics_new.csv"
++  #cluster_output_name <- "resources/linux/resources/cluster_graph_metrics_new.csv"
++  data_dir_name <- file.path("resources", p, "resources/maintainers_section_graph")
++  
++  files <- list.files(path = data_dir_name, pattern = "*.csv", full.names = TRUE, recursive = FALSE)
++  files <- files[!grepl("-rc", files, fixed = TRUE)]
++  files <- files[!grepl("filemap", files, fixed = TRUE)]
++  
++  for (file_name in files) {
++    print(file_name)
++    
++    #TODO: hier erste Variable als echten Graphnamen abspeichern lassen
++    file_map_name <- substr(basename(file_name), 1, nchar(basename(file_name))-4)
++    file_map_name <- paste0(file_map_name, "_filemap.csv")
++    file_map_name <- sub(basename(file_name), file_map_name, file_name)
++    
++    g_data <- maintainers_section_graph(file_name, p, file_map_name)
++    g <- g_data$graph
++    bounds <- g_data$bounds
++    comm_groups <- g_data$comm_groups
++    
++    for (i in bounds) {
++      group <- comm_groups[i]
++      group_list <- unname(group)[[1]]
++      cluster_graph <- igraph::delete_vertices(g, which(!(V(g)$name %in% group_list)))
++
++      graph_name <- c(graph_name, basename(file_name))
++      cluster_index_list <- c(cluster_index_list, i)
++      project_column <- c(project_column, p)
++      avg.path.length_list <- c(avg.path.length_list, metrics.avg.pathlength(cluster_graph, directed = FALSE))
++    }
++  }
++}
++
++
++f_releases <- 'resources/releases.csv'
++load_releases <- function(filename) {
++  data <- read_csv(filename)
++  data <- data %>% mutate(date = as.Date(date))
++}
++if (!exists('releases')) {
++  releases <- load_releases(f_releases)
++}
++
++df <- data.frame(graph_name, project_column, cluster_index_list, avg.path.length_list)
++write.csv(df, "resources/avg_path_length.csv")
++# substitue NaN with 0
++#df$avg.path.length_list[is.nan(df$avg.path.length_list)] <- 0
++#df$graph_name = substr(df$graph_name, 1, nchar(df$graph_name)-4)
++#df <- df %>% merge(releases, by.x = c("graph_name", "project_column"), by.y = c("release", "project"))
++#
++##df <- df %>% filter(project_column == "linux")
++#ggplot(df, aes(x=date, y=avg.path.length_list)) + 
++#  geom_boxplot() +
++#  my.theme +
++#    scale_x_date(date_breaks = '1 year', date_labels = '%Y',
++#                 #sec.axis = dup_axis(name = prj_releases,
++#                #                     breaks = releases$date,
++#                #                     labels = releases$release)
++#    ) +
++#  theme(axis.text.x = element_text(angle = 45, hjust = 1.25),
++#        axis.title.x = element_blank(), legend.title = element_blank()) +
++#  facet_wrap(~project_column, scales = "free")
+diff --git a/fse22-artifact/prepare_gui.sh b/fse22-artifact/prepare_gui.sh
+new file mode 100755
+index 0000000..9500e4e
+--- /dev/null
++++ b/fse22-artifact/prepare_gui.sh
+@@ -0,0 +1,55 @@
++#!/bin/bash
++
++set -e
++
++project=$1
++revision=$2
++
++# !FIXME Add argument sanity checks
++
++RESOURCES="./resources/$project/resources"
++TEX_IMG_DST="$RESOURCES/maintainers_cluster_img/$revision/"
++VERTEX_NAMES="$RESOURCES/maintainers_cluster/$revision.csv"
++PDF_DST="$TEX_IMG_DST/build"
++REPRO="./fse22-artifact/cluster_gui/$project-$revision/"
++SOLUTION="$REPRO/solution.csv"
++
++./pasta set_config $project
++
++# 1. Create the tex files
++./analyses/maintainers_section_graph.R \
++	$revision \
++	--print-clusters
++
++# 2. Randomise clusters
++./fse22-artifact/randomise_cluster.py \
++	$VERTEX_NAMES \
++	$TEX_IMG_DST
++
++# 3. Latex: compile all clusters
++mkdir -p $TEX_IMG_DST/build
++for i in $TEX_IMG_DST/*_standalone.tex; do
++	pdflatex -interaction=nonstopmode -output-directory=$PDF_DST $i
++done
++
++# 4. Move PDFs
++mv -v $PDF_DST/*.pdf $TEX_IMG_DST
++rm -rf $PDF_DST
++
++# 5. Convert all PDFs to PNGs
++for i in $TEX_IMG_DST/*.pdf; do
++	pdftoppm -png -singlefile $i ${i%.*}
++done
++
++# 6. Copy the PNGs to the destination directory
++mkdir -p $REPRO
++for cluster in $TEX_IMG_DST/*.png; do
++	cp -v $cluster $REPRO
++done
++
++# 7. Determine a random solution for the project
++echo -en > $SOLUTION
++for cluster in $REPRO/cluster_*.png; do
++	location=$(echo $(($RANDOM % 2)) | sed 's/0/l/' | sed 's/1/r/')
++	echo "$(basename $cluster), $location" >> $SOLUTION
++done
+diff --git a/fse22-artifact/randomise_cluster.py b/fse22-artifact/randomise_cluster.py
+new file mode 100755
+index 0000000..8cee8d5
+--- /dev/null
++++ b/fse22-artifact/randomise_cluster.py
+@@ -0,0 +1,32 @@
++#!/usr/bin/env python3
++
++import glob
++import os
++import random
++import re
++import sys
++
++def sanitise(s):
++	s = re.sub('\\\\', '', s)
++	s = re.sub(r'([_^$%&#{}])', r'\\\1', s)
++	s = re.sub(r'\~', r'\\~{}', s)
++	return s
++
++vertex_names = sys.argv[1]
++d_cluster = sys.argv[2]
++f_clusters = glob.glob(os.path.join(d_cluster, 'cluster_*_standalone.tex'))
++
++with open(vertex_names, 'r') as f:
++    vertex_names = list(filter(None, f.read().split('\n')))
++random.shuffle(vertex_names)
++
++for f_cluster_tex in f_clusters:
++    print('Replacing %s...' % f_cluster_tex)
++    with open(f_cluster_tex, 'r') as f:
++        tex = f.read().split('\n')
++
++    with open(os.path.join(os.path.dirname(f_cluster_tex), 'random_%s' % os.path.basename(f_cluster_tex)), 'w') as f:
++        for line in tex:
++            if line.startswith('\\node'):
++                line = re.sub('{.*}', '{%s}' % sanitise(vertex_names.pop()), line)
++            f.write('%s\n' % line)
+diff --git a/fse22-artifact/section_graph.py b/fse22-artifact/section_graph.py
+new file mode 100755
+index 0000000..19fa7f2
+--- /dev/null
++++ b/fse22-artifact/section_graph.py
+@@ -0,0 +1,192 @@
++#!/usr/bin/env python3
++
++import argparse
++import os
++import re
++
++CLUSTER_REGEX = re.compile(r'(cluster[0-9]*)\[draw,circle] // \[simple necklace layout] {(.*)};')
++EDGE_REGEX = re.compile(r'(cluster[0-9]*)-- (cluster[0-9]*)')
++
++class Cluster():
++    def __init__(self, cluster_name, cluster_body, x, y, custom_sep=False, sep=0, layout=""):
++        self.cluster_name = cluster_name
++        self.cluster_body = cluster_body
++        self.x = x
++        self.y = y
++        self.custom_sep = custom_sep
++        self.sep = sep
++        self.layout = layout
++
++class Edge():
++    def __init__(self, head, tail):
++        self.head = head
++        self.tail = tail
++
++def xen_routine(lines):
++    clusters = []
++    edges = []
++
++    # read and save the clusters and add manual modifications
++    # cluster1
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=9.5, y=-4.5, layout="spring layout, node distance=40"))
++
++    # cluster2
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    cluster2_body = cluster_match.group(2)
++    cluster2_body = cluster2_body.replace("\"x86 architecture\"-- \"efi\"",
++                                    "\"efi\"-- \"x86 architecture\"")
++    cluster2_body = cluster2_body.replace("\"x86 architecture\"-- \"intel(r) trusted\\nexecution technology (txt)\"",
++                                    "\"intel(r) trusted\\nexecution technology (txt)\"--[orient=|] \"x86 architecture\"")
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster2_body, x=-1, y=4, custom_sep=True, sep=-25, layout="spring electrical layout, electric charge=30"))
++
++    # cluster3
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=3, y=-4, layout="simple necklace layout"))
++
++    # cluster4
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=9, y=5.5, custom_sep=True, sep=-10, layout="spring electrical layout, electric charge=5"))
++
++    # cluster5
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=7.5, y=-0.2, layout="simple necklace layout"))
++
++    # read and save the edges
++    while lines and EDGE_REGEX.match(lines[0]):
++        edge_match = EDGE_REGEX.match(lines.pop(0))
++        edges.append(Edge(edge_match.group(1), edge_match.group(2)))
++
++    # modifications to all clusters
++    for cluster in clusters:
++        # replace '\n' with '\\' and '_' with '\_'
++        cluster.cluster_body = cluster.cluster_body.replace("\\n", "\\\\").replace("_", "\\_")
++
++    return clusters, edges
++
++
++def uboot_routine(lines):
++    clusters = []
++    edges = []
++
++    # cluster1
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    cluster1_body = cluster_match.group(2)
++    # move edge to beginning of body
++    cluster1_body = "\"arm zynqmp\"-- \"arm zynq\", " + cluster1_body.replace("\"arm zynqmp\"-- \"arm zynq\", ", "")
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster1_body, x=-8, y=9, custom_sep=True, sep=-10, layout="simple necklace layout"))
++
++    # cluster2
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=0, y=0, custom_sep=True, sep=-7, layout="simple necklace layout"))
++
++    # cluster3
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=-15, y=3, custom_sep=True, sep=-4, layout="simple necklace layout"))
++
++    # cluster4
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=0, y=-12, custom_sep=True, sep=0, layout="simple necklace layout"))
++
++    # cluster5
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    cluster5_body = cluster_match.group(2)
++    cluster5_body = cluster5_body.replace("\"ubi\"-- \"arm stm stm32mp\"",
++                                          "\"ubi\"[nudge left=200]-- \"arm stm stm32mp\"")
++    cluster5_body = cluster5_body.replace("\"arm amlogic\\nsoc support\"-- \"arm\"",
++                                          "\"arm amlogic\\nsoc support\"[nudge left=20]-- \"arm\"")
++    cluster5_body = cluster5_body.replace("\"power\"-- \"arm amlogic\\nsoc support\"",
++                                          "\"power\"[nudge left=83]-- \"arm amlogic\\nsoc support\"")
++    cluster5_body = cluster5_body.replace("\"arm stm stm32mp\"-- \"arm\"",
++                                          "\"arm stm stm32mp\"[nudge left=40]-- \"arm\"")
++    cluster5_body = cluster5_body.replace("\"arm snapdragon\"-- \"arm\"",
++                                          "\"arm snapdragon\"[nudge up=5]-- \"arm\"")
++    # cluster5_body = cluster5_body.replace("\"arm stm stm32mp\"-- \"arm\"",
++    #                                       "\"arm stm stm32mp\"[nudge up=30]-- \"arm\"")
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster5_body, x=-10, y=-7, custom_sep=True, sep=-30, layout="spring electrical layout, electric charge=100"))
++
++    # cluster6
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=1, y=10, custom_sep=True, sep=0, layout="simple necklace layout"))
++
++    # cluster7
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=2, y=-7, custom_sep=True, sep=-5, layout="simple necklace layout"))
++
++    # cluster8
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=-5, y=1.7, layout="simple necklace layout"))
++
++    # cluster9
++    cluster_match = CLUSTER_REGEX.match(lines.pop(0))
++    clusters.append(Cluster(cluster_name=cluster_match.group(1), cluster_body=cluster_match.group(2), x=3, y=5, layout="simple necklace layout"))
++
++    # read and save the edges
++    while lines and EDGE_REGEX.match(lines[0]):
++        edge_match = EDGE_REGEX.match(lines.pop(0))
++        head = edge_match.group(1)
++        tail = edge_match.group(2)
++
++        # only save edges that are connected to clusters in this graph
++        if head in (cluster.cluster_name for cluster in clusters) and tail in (cluster.cluster_name for cluster in clusters):
++            # edge modifications
++            if head == "cluster1" and tail == "cluster4":
++                head = "cluster1.120"
++            if head == "cluster4" and tail == "cluster1":
++                tail = "cluster1.120"
++
++            edges.append(Edge(head, tail))
++
++    # modifications to all clusters
++    for cluster in clusters:
++        # replace '\n' with '\\' and '_' with '\_'
++        cluster.cluster_body = cluster.cluster_body.replace("\\n", "\\\\").replace("_", "\\_")
++
++    return clusters, edges
++
++
++def main():
++    parser = argparse.ArgumentParser(description = "xen .tex file reproducer")
++    parser.add_argument("--file", type=str, help="path to input tex file", required=True)
++    parser.add_argument("--output", type=str, help="path to output file", required=True)
++
++    args = parser.parse_args()
++    file_path = args.file
++
++    file_handle = open(file_path, 'r')
++    lines = file_handle.readlines()
++
++    clusters, edges = None, None
++
++    if os.path.basename(file_path).startswith("RELEASE"): # xen
++        clusters, edges = xen_routine(lines)
++    else: # u-boot
++        clusters, edges = uboot_routine(lines)
++
++    # opening the output path in written mode, name of file_handle is 'f'
++    with open(args.output, 'w') as f:
++        f.write("\\begin{tikzpicture}[\n")
++        f.write("    subgraph text top=text centered,\n")
++        f.write("    cluster/.style={font=\\small},\n")
++        f.write("    ]\n\n")
++
++        # write the clusters
++        for cluster in clusters:
++            if cluster.custom_sep:
++                f.write("\\node[draw,circle,cluster,inner sep=%d] (%s) at (%.1f,%.1f) {\n" % (cluster.sep, cluster.cluster_name, cluster.x, cluster.y))
++            else:
++                f.write("\\node[draw,circle,cluster] (%s) at (%.1f,%.1f) {\n" % (cluster.cluster_name, cluster.x, cluster.y))
++            f.write("    \\tikz[every node/.style={rectangle,inner sep=0,align=center}]\\graph[%s] {\n" % cluster.layout)
++            f.write("        %s\n" % cluster.cluster_body)
++            f.write("    };\n")
++            f.write("};\n\n")
++
++        # write the edges
++        for edge in edges:
++            f.write("\\draw (%s) edge (%s);\n" % (edge.head, edge.tail))
++
++        f.write("\\end{tikzpicture}")
++
++
++if __name__ == '__main__':
++    ret = main()
+diff --git a/fse22-artifact/tikz_template.tex b/fse22-artifact/tikz_template.tex
+new file mode 100644
+index 0000000..968e282
+--- /dev/null
++++ b/fse22-artifact/tikz_template.tex
+@@ -0,0 +1,21 @@
++\documentclass{article}[a4paper,10pt]
++
++\usepackage{tikz}
++\usepackage{adjustbox}
++\usepackage{url}
++\usepackage{a4wide}
++
++\usetikzlibrary{graphs}
++\usetikzlibrary{graphdrawing}
++\usetikzlibrary{backgrounds}
++\usegdlibrary{circular,layered,force}
++
++\begin{document}
++	\pagestyle{empty}
++	\version
++	\begin{center}
++		\begin{adjustbox}{width=\textwidth,height=0.95\textheight,center}
++			\input{\filename}
++		\end{adjustbox}
++	\end{center}
++\end{document}
+diff --git a/fse22-artifact/util-networks-metrics.R b/fse22-artifact/util-networks-metrics.R
+new file mode 100644
+index 0000000..193bb22
+--- /dev/null
++++ b/fse22-artifact/util-networks-metrics.R
+@@ -0,0 +1,373 @@
++## This file is part of coronet, which is free software: you
++## can redistribute it and/or modify it under the terms of the GNU General
++## Public License as published by  the Free Software Foundation, version 2.
++##
++## This program is distributed in the hope that it will be useful,
++## but WITHOUT ANY WARRANTY; without even the implied warranty of
++## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++## GNU General Public License for more details.
++##
++## You should have received a copy of the GNU General Public License along
++## with this program; if not, write to the Free Software Foundation, Inc.,
++## 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++##
++## Copyright 2015, 2019 by Thomas Bock <bockthom@fim.uni-passau.de>
++## Copyright 2021 by Thomas Bock <bockthom@cs.uni-saarland.de>
++## Copyright 2017 by Raphael Nömmer <noemmer@fim.uni-passau.de>
++## Copyright 2017-2019 by Claus Hunsen <hunsen@fim.uni-passau.de>
++## Copyright 2017-2018 by Christian Hechtl <hechtl@fim.uni-passau.de>
++## Copyright 2018 by Barbara Eckl <ecklbarb@fim.uni-passau.de>
++## Copyright 2021 by Niklas Schneider <s8nlschn@stud.uni-saarland.de>
++## All Rights Reserved.
++
++
++## / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / /
++## Libraries ---------------------------------------------------------------
++
++requireNamespace("igraph")
++
++
++## / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / /
++## Metric functions --------------------------------------------------------
++
++#' Determine the maximum degree for the given network.
++#'
++#' @param network the network to be examined
++#' @param mode the mode to be used for determining the degrees [default: "total"]
++#'
++#' @return A data frame containing the name of the vertex with with maximum degree its degree.
++metrics.hub.degree = function(network, mode = c("total", "in", "out")) {
++    ## check whether the network is empty, i.e., if it has no vertices
++    if (igraph::vcount(network) == 0) {
++        ## print user warning instead of igraph error
++        logging::logwarn("The input network has no vertices. Will return NA right away.")
++
++        ## cancel the execution and return NA
++        return(NA)
++    }
++
++    mode = match.arg(mode)
++    degrees = igraph::degree(network, mode = c(mode))
++    vertex = which.max(degrees)
++    df = data.frame("name" = names(vertex), "degree" = unname(degrees[vertex]))
++    return(df)
++}
++
++#' Calculate the average degree of a network.
++#'
++#' @param network the network to be examined
++#' @param mode the mode to be used for determining the degrees [default: "total"]
++#'
++#' @return The average degree of the vertices in the network.
++metrics.avg.degree = function(network, mode = c("total", "in", "out")) {
++    mode = match.arg(mode)
++    degrees = igraph::degree(network, mode = c(mode))
++    avg = mean(degrees)
++    return(c(avg.degree = avg))
++}
++
++#' Calculate all vertex degrees for the given network
++#'
++#' @param network the network to be examined
++#' @param sort whether the resulting dataframe is to be sorted by the vertex degree [default: TRUE]
++#' @param sort.decreasing if sorting is active, this says whether the dataframe is to be
++#'                        sorted in descending or ascending order [default: TRUE]
++#'
++#' @return A dataframe containing the vertices and their respective degrees.
++metrics.vertex.degrees = function(network, sort = TRUE, sort.decreasing = TRUE) {
++    if (sort) {
++        degrees = sort(igraph::degree(network, mode = "total"), decreasing = sort.decreasing)
++    } else {
++        degrees = igraph::degree(network, mode = "total")
++    }
++    return(data.frame("name" = names(degrees), "degree" = unname(degrees)))
++}
++
++#' Calculate the density of the given network.
++#'
++#' @param network the network to be examined
++#'
++#' @return The density of the network.
++metrics.density = function(network) {
++    density = igraph::graph.density(network)
++    return(c(density = density))
++}
++
++#' Calculate the average path length for the given network.
++#'
++#' @param network the network to be examined
++#' @param directed whether to consider directed paths in directed networks [default: TRUE]
++#' @param unconnected whether there are subnetworks in the network that are not connected.
++#'                    If \code{TRUE} only the lengths of the existing paths are considered and averaged;
++#'                    if \code{FALSE} the length of the missing paths are counted having length \code{vcount(graph)}, one longer than
++#'                    the longest possible geodesic in the network (from igraph documentation) [default: TRUE]
++#'
++#' @return The average path length of the given network.
++metrics.avg.pathlength = function(network, directed = TRUE, unconnected = TRUE) {
++    avg.pathlength = igraph::average.path.length(network, directed = directed, unconnected = unconnected)
++    return(c(avg.pathlength = avg.pathlength))
++}
++
++#' Calculate the average clustering coefficient for the given network.
++#'
++#' *Note*: The local clustering coefficient is \code{NaN} for all vertices with a degree < 2.
++#' Such vertices are removed from all average calculations for any averaging \code{cc.type}.
++#'
++#' @param network the network to be examined
++#' @param cc.type the type of cluserting coefficient to be calculated [default: "global"]
++#'
++#' @return The clustering coefficient of the network.
++metrics.clustering.coeff = function(network, cc.type = c("global", "local", "barrat", "localaverage")) {
++    cc.type = match.arg(cc.type)
++    cc = igraph::transitivity(network, type = cc.type, vids = NULL)
++    return(c(clustering = cc))
++}
++
++#' Calculate the modularity metric for the given network.
++#'
++#' @param network the network to be examined
++#' @param community.detection.algorithm the algorithm to be used for the detection of communities
++#'            which is required for the calculation of the clustering coefficient [default: igraph::cluster_walktrap]
++#'
++#' @return The modularity value for the given network.
++metrics.modularity = function(network, community.detection.algorithm = igraph::cluster_walktrap) {
++    comm = community.detection.algorithm(network)
++    mod = igraph::modularity(network, igraph::membership(comm))
++    return(c(modularity = mod))
++}
++
++#' This function determines whether a network can be considered a
++#' small-world network based on a quantitative categorical decision.
++#'
++#' The procedure used in this function is based on the work "Network
++#' 'Small-World-Ness': A Quantitative Method for Determining Canonical
++#' Network Equivalence" by Mark D. Humphries and Kevin Gurney [1].
++#' [1] http://journals.plos.org/plosone/article?id=10.1371/journal.pone.0002051
++#'
++#' The algorithm relies on the Erdös-Renyi random network with the same number
++#' of vertices and edges as the given network.
++#'
++#' In order to get a binary (true/false) decision on smallworldness of a network,
++#' use \code{metrics.is.smallworld} instead.
++#'
++#' Important: The given network needs to be simplified for the calculation to work!
++#'
++#' @param network the simplified network to be examined
++#'
++#' @return The smallworldness value of the network.
++metrics.smallworldness = function(network) {
++    ## first check whether the network is simplified
++    if (!is.simple(network)) {
++        ## if this is not the case, raise an error and stop the execution
++        error.message = "The input network has too many edges. Try again with a simplified network."
++        logging::error(error.message)
++        stop(error.message)
++    }
++
++    ## else construct Erdös-Renyi network 'h' with same number of vertices and edges as the given network 'network',
++    ## as the requirement of the function is fulfilled
++    h = igraph::erdos.renyi.game(n = igraph::vcount(network),
++                                 p.or.m = igraph::ecount(network),
++                                 type = "gnm",
++                                 directed = FALSE)
++
++    ## compute clustering coefficients
++    g.cc = igraph::transitivity(network, type = "global")
++    h.cc = igraph::transitivity(h, type = "global")
++    ## compute average shortest-path length
++    g.l = igraph::average.path.length(network, unconnected = TRUE)
++    h.l = igraph::average.path.length(h, unconnected = TRUE)
++
++    ## binary decision
++    ## intermediate variables
++    gamma = g.cc / h.cc
++    lambda = g.l / h.l
++
++    ## indicator s.delta
++    s.delta = gamma / lambda
++
++    return (c(smallworldness = s.delta))
++}
++
++#' Decide, whether a network is smallworld or not.
++#'
++#' @param network the network to be examined
++#'
++#' @return \code{TRUE}, if the network is smallworld,
++#'         \code{FALSE}, if it is not,
++#'         \code{NA}, if an error occured.
++metrics.is.smallworld = function(network) {
++    s.delta = metrics.smallworldness(network)
++
++    ## return whether the network is smallworld
++    return(s.delta > 1)
++}
++
++
++#' Determine scale freeness of a network using the power law fitting method.
++#'
++#' @param network the network to be examined
++#' @param minimum.number.vertices the minimum number of vertices with which
++#'  a network can be scale free [default: 30]
++#'
++#' @return A dataframe containing the different values, connected to scale-freeness.
++metrics.scale.freeness = function(network, minimum.number.vertices = 30) {
++    v.degree = sort(igraph::degree(network, mode = "total"), decreasing = TRUE)
++
++    ## Power-law fiting
++    ## (by  Mitchell Joblin <mitchell.joblin.ext@siemens.com>, Siemens AG,  2012, 2013)
++    p.fit = igraph::power.law.fit(v.degree, implementation = "plfit")
++    param.names = c("alpha", "xmin", "KS.p")
++    res = list()
++    res[param.names] = p.fit[param.names]
++
++    ## Check percent of vertices under power-law
++    res["num.power.law"] = length(which(v.degree >= res[["xmin"]]))
++    res["percent.power.law"] = 100 * (res[["num.power.law"]] / length(v.degree))
++
++    ## If less than minimum.number.vertices vertices are in the power law, set x_min manually
++    ## to include a minimum of number of vertices and recompute the powerlaw fit
++    non.zero.degree.v.count = length(v.degree[v.degree > 0])
++    if(res[["num.power.law"]] < minimum.number.vertices
++       & non.zero.degree.v.count >= minimum.number.vertices) {
++        ## vertex degree is sorted above
++        x.min = v.degree[[minimum.number.vertices]]
++        p.fit = power.law.fit(v.degree, implementation = "plfit", xmin = x.min)
++        res[param.names] = p.fit[param.names]
++
++        ## Check percent of vertices under power-law
++        res[["num.power.law"]] = length(which(v.degree >= res[["xmin"]]))
++        res[["percent.power.law"]] = 100 * (res[["num.power.law"]] / length(v.degree))
++    }
++
++    ## Remove non conclusive sample sizes
++    if(res[["num.power.law"]] < minimum.number.vertices) {
++        res[["KS.p"]] = 0 # 0 instead of NA
++    }
++
++    df = as.data.frame(res, row.names = "scale.freeness")
++    return(df)
++}
++
++#' Decide, whether a network is scale free or not.
++#'
++#' @param network the network to be examined
++#' @param minimum.number.vertices the minimum number of vertices with which
++#'  a network can be scale free [default: 30]
++#'
++#' @return \code{TRUE}, if the network is scale free,
++#'         \code{FALSE}, otherwise.
++metrics.is.scale.free = function(network, minimum.number.vertices = 30) {
++    df = metrics.scale.freeness(network, minimum.number.vertices)
++    return(df[["KS.p"]] >= 0.05)
++}
++
++#' Calculate the hierarchy values for a network, i.e., the vertex degrees and the local
++#' clustering coefficient.
++#'
++#' *Note*: The local clustering coefficient is \code{NaN} for all vertices with a degree < 2.
++#'
++#' @param network the network to be examined
++#'
++#' @return a data.frame containing the following columns:
++#'         - \code{"deg"}: the vertex degrees for all vertices in the given network,
++#'         - \code{"cc"}: the local clustering coefficient for all vertices in the given network, and
++#'         - \code{"log.deg"} and \code{"log.cc"}: the logarithmic values for the columns
++#'                \code{"deg"} and \code{"cc"}, respectively (see function \code{log})
++metrics.hierarchy = function(network) {
++    degrees = igraph::degree(network, mode = "total")
++    cluster.coeff = igraph::transitivity(network, type = "local", vids = NULL)
++    return(data.frame(
++        deg = degrees,
++        cc = cluster.coeff,
++        log.deg = log(degrees),
++        log.cc = log(cluster.coeff)
++    ))
++}
++
++
++## The column headers for a centrality data frame calculated by the function \code{metrics.vertex.centralities}
++VERTEX.CENTRALITIES.COLUMN.NAMES = c("vertex.name", "centrality")
++
++#' Calculate the centrality value for vertices from a network and project data.
++#' If a \code{ProjectData} is supplied, only vertices from the network that are also present in the project data are
++#' considered. Otherwise, if no custom vector \code{restrict.classification.to.vertices} is supplied, all vertices of
++#' the network are considered.
++#'
++#' @param network the network containing the vertices to classify
++#' @param proj.data the \code{ProjectData} containing the authors or artifacts to classify
++#' @param type a character string declaring the classification metric. The classification metric determines which
++#'             numerical characteristic of vertices is chosen as their centrality value.
++#'             The parameter only supports network-based options/metrics:
++#'              - "network.degree"
++#'              - "network.eigen"
++#'              - "network.hierarchy"
++#'             [defalt: "network.degree"]
++#' @param restrict.classification.to.vertices a vector of vertex names. Only vertices that are contained within this
++#'                                            vector are to be classified. Vertices that appear in the vector but are
++#'                                            not part of the classification result (i.e., they are not present in the
++#'                                            underlying data) will be added to it afterwards (with a centrality value
++#'                                            of \code{NA}). \code{NULL} means that the restriction is automatically
++#'                                            calculated from the data based on the network's edge relations if and only
++#'                                            if both network and data are present. In any other case \code{NULL} will
++#'                                            not introduce any further restriction. [default: NULL]
++#'
++#' @return a data.frame with the columns \code{"vertex.name"} and \code{"centrality"} containing the centrality values
++#'         for each respective vertex
++metrics.vertex.centralities = function(network,
++                                       proj.data,
++                                       type = c("network.degree",
++                                                "network.eigen",
++                                                "network.hierarchy"),
++                                       restrict.classification.to.vertices = NULL) {
++    type = match.arg(type)
++
++    ## check whether the restrict parameter is set to default 'NULL'
++    if (is.null(restrict.classification.to.vertices)) {
++        ## now check whether both data and network are present
++        if (!is.null(network) && !is.null(proj.data) && igraph::vcount(network) > 0 && igraph::ecount(network) > 0) {
++            ## in this case calculate the restrict parameter based on the edge relation along with the vertices from
++            ## these data.sources
++            sources = get.data.sources.from.relations(network)
++
++            ## first check whether the network only consists of author vertices
++            ## therefore get a vector with all vertex types
++            vertex.types = unique(igraph::V(network)$type)
++            if (vertex.types == TYPE.AUTHOR) {
++                ## in this case, use the 'get.authors.by.data.source' function to get the author list
++                restrict.classification.to.vertices = proj.data$get.authors.by.data.source(sources)[["author.name"]]
++            }
++            else if (vertex.types == TYPE.ARTIFACT) {
++                ## in this case, always use artifact relation, as both unipartite edges connecting to artifact vertices
++                ## as well as bipartite have an artifact relation
++                restrict.classification.to.vertices = proj.data$get.artifacts(sources)
++            }
++            else {
++                ## when both vertex types are present, compute both authors and artifacts into one vector
++                restrict.authors = proj.data$get.authors.by.data.source(sources)[["author.name"]]
++                restrict.artifacts = proj.data$get.artifacts(sources)
++                restrict.classification.to.vertices = append(restrict.authors, restrict.artifacts)
++            }
++        }
++        ## else leave the parameter at 'NULL' which still serves as a default value for the
++        ## 'get.author.class.by.type' function
++    }
++
++    ## calculate the centrality tables
++    class = get.author.class.by.type(network = network,
++                                     proj.data = proj.data,
++                                     type = type,
++                                     restrict.classification.to.authors = restrict.classification.to.vertices)
++
++    ## bind the two data frames for core and peripheral together
++    centrality = rbind(class[["core"]], class[["peripheral"]])
++
++    ## set column names accordingly
++    colnames(centrality) = VERTEX.CENTRALITIES.COLUMN.NAMES
++
++    ## order by centrality (descending) (with NA being at the bottom) and then by name (ascending)
++    centrality = centrality[order(-centrality[[ VERTEX.CENTRALITIES.COLUMN.NAMES[[2]] ]],
++                                  centrality[[ VERTEX.CENTRALITIES.COLUMN.NAMES[[1]] ]]), ]
++
++    return(centrality)
++}
+diff --git a/tools/analyse_project.sh b/tools/analyse_project.sh
+new file mode 100755
+index 0000000..19d930a
+--- /dev/null
++++ b/tools/analyse_project.sh
+@@ -0,0 +1,55 @@
++#!/bin/bash
++
++set -e
++
++project=$1
++
++RES="./resources/$project/resources/"
++RESULT="$HOME/results/$project/"
++
++analyse () {
++	./pasta analyse $1 -tf 1 -th 1 -adi 365
++	./pasta rate -ta 0.8 -ti 0.8
++	./pasta rate -w 1 -ta 1 -ti 1
++	./pasta rate -w 0 -ta 1 -ti 1
++}
++
++./pasta set_config $project
++
++if [ $project == "linux" ]; then
++	./analyses/ignored_patches.R $RES/R $RES/characteristics.csv $RES/releases.csv
++else
++	# Remove invalids, we have to update to latest&greatest resources, so we have
++	# to rebuild it in any case.
++	rm -fv $RES/mbox/invalid/*
++
++	# We must do that under all circumstances, as the upstream repo might have new
++	# versions that we don't yet track.
++	./tools/generate_maintainers_clusters.sh
++	./pasta sync -mbox -create all
++
++	analyse rep
++	analyse upstream
++
++	./pasta prepare_evaluation --process_characteristics
++fi
++
++
++# Remove pkl files to save memory
++rm -fv $RES/*.pkl
++
++# Compile tex files
++cd $RES/R
++for i in */; do
++	cd $i
++	mkdir build
++	for j in *_standalone.tex; do
++		pdflatex -interaction=nonstopmode -output-directory=build/ $j
++		mv -v build/${j%.*}.pdf .
++	done
++	rm -rf build
++	cd ..
++done
++
++mkdir -p $RESULT
++cp -av * $RESULT
+-- 
+2.35.1
+
